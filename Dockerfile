@@ -4,7 +4,7 @@ RUN mkdir -p /src/ingress
 WORKDIR /src/ingress
 
 COPY go.mod .
-# COPY go.sum .
+COPY go.sum .
 RUN go mod download
 
 COPY . .
