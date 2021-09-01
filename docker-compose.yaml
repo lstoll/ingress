@@ -11,5 +11,10 @@ services:
       - "-listen=:8080"
       - "-upstream-url=http://httpd:80"
       - "-disable-letsencrypt"
+      - "-encryption-key=keepitsafe"
+      # piggy back on this, we should get our own
+      - "-oidc-issuer=https://id.lds.li"
+      - "-oidc-client-id=kubernetes"
+      - "-oidc-client-secret=public"
   httpd:
     image: httpd

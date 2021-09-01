@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	_ "embed"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -16,9 +18,12 @@ import (
 	"time"
 
 	"github.com/armon/go-proxyproto"
+	"github.com/gorilla/sessions"
 	"github.com/oklog/run"
 	"github.com/open-policy-agent/opa/rego"
+	oidcm "github.com/pardot/oidc/middleware"
 	"golang.org/x/crypto/acme/autocert"
+	"golang.org/x/crypto/hkdf"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -36,15 +41,23 @@ func main() {
 		KubeconfigPath     string
 		Secret             string
 		HTTPPolicyFile     string
+		OIDCIssuer         string
+		OIDCClientID       string
+		OIDCClientSecret   string
+		EncryptionKey      string
 	}{}
 
 	flag.StringVar(&cfg.Listen, "listen", "localhost:8080", "host:port to listen on")
-	flag.StringVar(&cfg.PublicURL, "public-url", "http://localhost", "URL service is served on, for certificate management")
-	flag.StringVar(&cfg.UpstreamURL, "upstream-url", "http://localhost:8080", "URL of upstream service to proxy traffic to")
+	flag.StringVar(&cfg.PublicURL, "public-url", "http://localhost:8080", "URL service is served on, for certificate management")
+	flag.StringVar(&cfg.UpstreamURL, "upstream-url", "http://httpd", "URL of upstream service to proxy traffic to")
 	flag.BoolVar(&cfg.DisableLetsencrypt, "disable-letsencrypt", false, "Don't manage certs with letsencrypt. Useful for local dev")
 	flag.StringVar(&cfg.KubeconfigPath, "kubeconfig", filepath.Join(homedir.HomeDir(), ".kube", "config"), "Path to kubeconfig, if not set in-cluster config assumed")
 	flag.StringVar(&cfg.Secret, "secret", "", "namespace/name formatted secret to use for TLS cert storage")
 	flag.StringVar(&cfg.HTTPPolicyFile, "http-policy", "", "(optional) path to rego file, for policy to apply to connections")
+	flag.StringVar(&cfg.OIDCIssuer, "oidc-issuer", "", "OIDC issuer to auth against")
+	flag.StringVar(&cfg.OIDCClientID, "oidc-client-id", "", "OIDC client ID")
+	flag.StringVar(&cfg.OIDCClientSecret, "oidc-client-secret", "", "OIDC client secret")
+	flag.StringVar(&cfg.EncryptionKey, "encryption-key", "", "encryption key for securing session")
 
 	flag.Parse()
 
@@ -52,10 +65,29 @@ func main() {
 	if err != nil {
 		log.Fatalf("parsing %s: %v", cfg.UpstreamURL, err)
 	}
-	pURL, err := url.Parse(cfg.UpstreamURL)
+	pURL, err := url.Parse(cfg.PublicURL)
 	if err != nil {
 		log.Fatalf("parsing %s: %v", cfg.UpstreamURL, err)
 	}
+
+	if cfg.EncryptionKey == "" {
+		log.Fatal("-encryption-key must be specified")
+	}
+
+	krdr := hkdf.New(sha256.New, []byte(cfg.EncryptionKey), nil, nil)
+	scHashKey := make([]byte, 64)
+	scEncryptKey := make([]byte, 32)
+	if _, err := io.ReadFull(krdr, scHashKey); err != nil {
+		log.Fatal(err)
+	}
+	if _, err := io.ReadFull(krdr, scEncryptKey); err != nil {
+		log.Fatal(err)
+	}
+
+	sess := sessions.NewCookieStore(scHashKey, scEncryptKey)
+	sess.Options.Path = "/"
+	sess.Options.MaxAge = 12 * 60 * 60
+	sess.Options.HttpOnly = true
 
 	mux := http.NewServeMux()
 
@@ -65,6 +97,22 @@ func main() {
 	// Start middleware section
 
 	var handler http.Handler
+
+	if cfg.OIDCIssuer != "" {
+		oidch := &oidcm.Handler{
+			Issuer:       cfg.OIDCIssuer,
+			ClientID:     cfg.OIDCClientID,
+			ClientSecret: cfg.OIDCClientSecret,
+			BaseURL:      pURL.String(),
+			RedirectURL:  pURL.ResolveReference(&url.URL{Path: "/.ingress/oidc/callback"}).String(),
+			SessionStore: sess,
+			SessionName:  "ohp",
+			// ACRValues:        []string{"http://schemas.openid.net/pape/policies/2007/06/multi-factor-physical"},
+			// AdditionalScopes: []string{"groups"},
+		}
+
+		handler = oidch.Wrap(mux)
+	}
 
 	if cfg.HTTPPolicyFile != "" {
 		httpPolicy, err := os.ReadFile(cfg.HTTPPolicyFile)

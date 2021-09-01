@@ -4,8 +4,10 @@ go 1.17
 
 require (
 	github.com/armon/go-proxyproto v0.0.0-20210323213023-7e956b284f0a
+	github.com/gorilla/sessions v1.2.1
 	github.com/oklog/run v1.1.0
 	github.com/open-policy-agent/opa v0.32.0
+	github.com/pardot/oidc v0.0.0-20210715175011-6dc93da8979e
 	golang.org/x/crypto v0.0.0-20210817164053-32db794688a5
 	k8s.io/api v0.22.1
 	k8s.io/apimachinery v0.22.1
@@ -23,6 +25,7 @@ require (
 	github.com/google/go-cmp v0.5.5 // indirect
 	github.com/google/gofuzz v1.1.0 // indirect
 	github.com/googleapis/gnostic v0.5.5 // indirect
+	github.com/gorilla/securecookie v1.1.1 // indirect
 	github.com/imdario/mergo v0.3.5 // indirect
 	github.com/json-iterator/go v1.1.11 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
@@ -42,6 +45,7 @@ require (
 	google.golang.org/appengine v1.6.7 // indirect
 	google.golang.org/protobuf v1.27.1 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
+	gopkg.in/square/go-jose.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.0-20210107192922-496545a6307b // indirect
 	k8s.io/klog/v2 v2.9.0 // indirect

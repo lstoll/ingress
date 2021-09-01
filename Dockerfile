@@ -12,5 +12,6 @@ COPY . .
 RUN CGO_ENABLED=0 go install ./...
 
 FROM scratch
+COPY --from=build-env /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build-env /go/bin/ingress /ingress
 ENTRYPOINT ["/ingress]

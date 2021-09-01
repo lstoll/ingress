@@ -6,7 +6,7 @@ it's a sidecar, that can be the target of an internet facing kubernetes service 
 
 it handles:
 * TLS via LetsEncrypt :white_check_mark:
-* Auth via OIDC web flow :x:
+* Auth via OIDC web flow :white_check_mark:
 * Auth via OIDC token in header :x:
 * IP Allowlist Enforcement :white_check_mark:
 * Managed device client cert auth. :x:
