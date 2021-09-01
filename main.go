@@ -1,17 +1,22 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 
 	"github.com/armon/go-proxyproto"
+	"github.com/oklog/run"
 )
 
 func main() {
+	ctx := context.Background()
+
 	cfg := struct {
 		Listen      string
 		UpstreamURL string
@@ -38,5 +43,19 @@ func main() {
 	}
 	plis := &proxyproto.Listener{Listener: lis}
 
-	log.Fatal(http.Serve(plis, mux))
+	var g run.Group
+	g.Add(run.SignalHandler(ctx, os.Interrupt))
+
+	g.Add(func() error {
+		log.Printf("Serving on %s", cfg.Listen)
+		return http.Serve(plis, mux)
+	}, func(error) {
+		lis.Close()
+	})
+
+	log.Fatal(g.Run())
+	if err := g.Run(); err != nil {
+		log.Fatalf("running: %v", err)
+	}
+	log.Print("done")
 }

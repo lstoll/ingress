@@ -8,6 +8,7 @@ services:
       - "8080:8080"
     entrypoint: /ingress
     command:
+      - "-listen=:8080"
       - "-upstream-url=http://httpd:80"
   httpd:
     image: httpd
