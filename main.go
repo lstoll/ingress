@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"flag"
 	"fmt"
 	"log"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/armon/go-proxyproto"
 	"github.com/oklog/run"
+	"github.com/open-policy-agent/opa/rego"
 	"golang.org/x/crypto/acme/autocert"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -33,6 +35,7 @@ func main() {
 		DisableLetsencrypt bool
 		KubeconfigPath     string
 		Secret             string
+		HTTPPolicyFile     string
 	}{}
 
 	flag.StringVar(&cfg.Listen, "listen", "localhost:8080", "host:port to listen on")
@@ -41,6 +44,7 @@ func main() {
 	flag.BoolVar(&cfg.DisableLetsencrypt, "disable-letsencrypt", false, "Don't manage certs with letsencrypt. Useful for local dev")
 	flag.StringVar(&cfg.KubeconfigPath, "kubeconfig", filepath.Join(homedir.HomeDir(), ".kube", "config"), "Path to kubeconfig, if not set in-cluster config assumed")
 	flag.StringVar(&cfg.Secret, "secret", "", "namespace/name formatted secret to use for TLS cert storage")
+	flag.StringVar(&cfg.HTTPPolicyFile, "http-policy", "", "(optional) path to rego file, for policy to apply to connections")
 
 	flag.Parse()
 
@@ -58,14 +62,31 @@ func main() {
 	proxy := httputil.NewSingleHostReverseProxy(usURL)
 	mux.Handle("/", proxy)
 
-	lis, err := net.Listen("tcp", cfg.Listen)
-	if err != nil {
-		log.Fatalf("listening on %s: %v", cfg.Listen, err)
+	// Start middleware section
+
+	var handler http.Handler
+
+	if cfg.HTTPPolicyFile != "" {
+		httpPolicy, err := os.ReadFile(cfg.HTTPPolicyFile)
+		if err != nil {
+			log.Fatalf("reading %s: %v", cfg.HTTPPolicyFile, err)
+		}
+
+		query, err := rego.New(
+			rego.Query("data.http.allow"),
+			rego.Module("http.rego", string(httpPolicy)),
+		).PrepareForEval(ctx)
+		if err != nil {
+			log.Fatalf("failed to prepare HTTP policy: %v", err)
+		}
+
+		handler = httpPolicyHandler(mux, AuthorizerFunc(func(r *http.Request) error {
+			return regoAuthorize(r, query)
+		}))
 	}
-	plis := &proxyproto.Listener{Listener: lis}
 
 	hs := &http.Server{
-		Handler: mux,
+		Handler: handler,
 	}
 
 	if !cfg.DisableLetsencrypt {
@@ -112,6 +133,12 @@ func main() {
 		}
 		hs.TLSConfig = acm.TLSConfig()
 	}
+
+	lis, err := net.Listen("tcp", cfg.Listen)
+	if err != nil {
+		log.Fatalf("listening on %s: %v", cfg.Listen, err)
+	}
+	plis := &proxyproto.Listener{Listener: lis}
 
 	var g run.Group
 	g.Add(run.SignalHandler(ctx, os.Interrupt))

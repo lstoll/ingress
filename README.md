@@ -8,7 +8,7 @@ it handles:
 * TLS via LetsEncrypt :white_check_mark:
 * Auth via OIDC web flow :x:
 * Auth via OIDC token in header :x:
-* IP Allowlist Enforcement :x:
+* IP Allowlist Enforcement :white_check_mark:
 * Managed device client cert auth. :x:
 * Passing user info back :x:
 
