@@ -10,5 +10,6 @@ services:
     command:
       - "-listen=:8080"
       - "-upstream-url=http://httpd:80"
+      - "-disable-letsencrypt"
   httpd:
     image: httpd
