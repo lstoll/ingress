@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base32"
 	"encoding/base64"
 	"fmt"
 
@@ -13,7 +14,11 @@ import (
 	"k8s.io/client-go/util/retry"
 )
 
+const keyNameAnnotation = "key-mapping/"
+
 var _ autocert.Cache = (*autocertCache)(nil)
+
+var secKeyEnc = base32.StdEncoding.WithPadding(base32.NoPadding)
 
 // autocertCache is an implementation of the store that autocert uses to manage
 // certificates. we stick it all into a single kubernetes secret, as in our
@@ -36,7 +41,7 @@ func (a *autocertCache) Get(ctx context.Context, key string) ([]byte, error) {
 		return nil, autocert.ErrCacheMiss
 	}
 
-	v, ok := sec.Data[key]
+	v, ok := sec.Data[secKeyEnc.EncodeToString([]byte(key))]
 	if !ok {
 		return nil, autocert.ErrCacheMiss
 	}
@@ -71,7 +76,9 @@ func (a *autocertCache) Put(ctx context.Context, key string, data []byte) error 
 			}
 		}
 
-		sec.Data[key] = []byte(base64.StdEncoding.EncodeToString(data))
+		encoded := secKeyEnc.EncodeToString([]byte(key))
+		sec.Annotations[keyNameAnnotation+encoded] = key
+		sec.Data[encoded] = []byte(base64.StdEncoding.EncodeToString(data))
 
 		if needsCreate {
 			// need to return the raw error so the retry can detect a conflict and correctly retry.
@@ -106,11 +113,11 @@ func (a *autocertCache) Delete(ctx context.Context, key string) error {
 			return nil
 		}
 
-		if _, ok := sec.Data[key]; !ok {
+		if _, ok := sec.Data[secKeyEnc.EncodeToString([]byte(key))]; !ok {
 			return nil
 		}
 
-		delete(sec.Data, key)
+		delete(sec.Data, secKeyEnc.EncodeToString([]byte(key)))
 
 		if _, err := a.clientset.CoreV1().Secrets(a.secretNamespace).Update(context.TODO(), sec, metav1.UpdateOptions{}); err != nil {
 			return err
