@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	_ "embed"
 	"flag"
 	"fmt"
@@ -45,10 +47,11 @@ func main() {
 		OIDCClientID       string
 		OIDCClientSecret   string
 		EncryptionKey      string
+		ClientCAFile       string
 	}{}
 
 	flag.StringVar(&cfg.Listen, "listen", "localhost:8080", "host:port to listen on")
-	flag.StringVar(&cfg.PublicURL, "public-url", "http://localhost:8080", "URL service is served on, for certificate management")
+	flag.StringVar(&cfg.PublicURL, "public-url", "https://localhost:8080", "URL service is served on, for certificate management")
 	flag.StringVar(&cfg.UpstreamURL, "upstream-url", "http://httpd", "URL of upstream service to proxy traffic to")
 	flag.BoolVar(&cfg.DisableLetsencrypt, "disable-letsencrypt", false, "Don't manage certs with letsencrypt. Useful for local dev")
 	flag.StringVar(&cfg.KubeconfigPath, "kubeconfig", filepath.Join(homedir.HomeDir(), ".kube", "config"), "Path to kubeconfig, if not set in-cluster config assumed")
@@ -58,7 +61,7 @@ func main() {
 	flag.StringVar(&cfg.OIDCClientID, "oidc-client-id", "", "OIDC client ID")
 	flag.StringVar(&cfg.OIDCClientSecret, "oidc-client-secret", "", "OIDC client secret")
 	flag.StringVar(&cfg.EncryptionKey, "encryption-key", "", "encryption key for securing session")
-
+	flag.StringVar(&cfg.ClientCAFile, "client-ca-bundle", "", "(optional) path to bundle of PEM formatted CA certs, to request from clients. Non-enforcing, use policy")
 	flag.Parse()
 
 	usURL, err := url.Parse(cfg.UpstreamURL)
@@ -96,7 +99,22 @@ func main() {
 
 	// Start middleware section
 
-	var handler http.Handler
+	var (
+		handler      http.Handler
+		clientCAPool *x509.CertPool
+	)
+
+	if cfg.ClientCAFile != "" {
+		ccaPEM, err := os.ReadFile(cfg.ClientCAFile)
+		if err != nil {
+			log.Fatalf("reading %s: %v", cfg.ClientCAFile, err)
+		}
+
+		clientCertPool := x509.NewCertPool()
+		clientCertPool.AppendCertsFromPEM(ccaPEM)
+
+		handler = captureClientCert(clientCertPool, handler)
+	}
 
 	if cfg.OIDCIssuer != "" {
 		oidch := &oidcm.Handler{
@@ -133,11 +151,15 @@ func main() {
 		}))
 	}
 
-	hs := &http.Server{
-		Handler: handler,
-	}
+	var tlsConfig *tls.Config
 
-	if !cfg.DisableLetsencrypt {
+	if cfg.DisableLetsencrypt {
+		tlsConfig = &tls.Config{
+			Certificates: []tls.Certificate{
+				mustSelfCert(),
+			},
+		}
+	} else {
 		if cfg.Secret == "" {
 			log.Fatal("-secret must be provided")
 		}
@@ -179,7 +201,12 @@ func main() {
 			},
 			HostPolicy: autocert.HostWhitelist(h),
 		}
-		hs.TLSConfig = acm.TLSConfig()
+		tlsConfig = acm.TLSConfig()
+	}
+
+	if clientCAPool != nil {
+		tlsConfig.ClientAuth = tls.RequestClientCert
+		tlsConfig.ClientCAs = clientCAPool
 	}
 
 	lis, err := net.Listen("tcp", cfg.Listen)
@@ -187,13 +214,17 @@ func main() {
 		log.Fatalf("listening on %s: %v", cfg.Listen, err)
 	}
 	plis := &proxyproto.Listener{Listener: lis}
+	tlis := tls.NewListener(plis, tlsConfig)
 
 	var g run.Group
 	g.Add(run.SignalHandler(ctx, os.Interrupt))
 
+	hs := &http.Server{
+		Handler: handler,
+	}
 	g.Add(func() error {
 		log.Printf("Serving on %s", cfg.Listen)
-		return hs.Serve(plis)
+		return hs.Serve(tlis)
 	}, func(error) {
 		// if we are here context probably already gone. use a new one with a timeout
 		sctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

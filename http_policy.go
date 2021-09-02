@@ -56,11 +56,18 @@ func regoAuthorize(r *http.Request, q rego.PreparedEvalQuery) error {
 		return err
 	}
 
+	var clientCN string
+	pc := presentedCertFromContext(r.Context())
+	if pc != nil {
+		clientCN = pc.CommonName
+	}
+
 	results, err := q.Eval(r.Context(), rego.EvalInput(map[string]interface{}{
 		"request": map[string]interface{}{
 			"method":    r.Method,
 			"path":      r.URL.Path,
 			"client_ip": ip.String(),
+			"client_cn": clientCN,
 		},
 	}))
 

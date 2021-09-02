@@ -9,7 +9,7 @@ it handles:
 * Auth via OIDC web flow :white_check_mark:
 * Auth via OIDC token in header :x:
 * IP Allowlist Enforcement :white_check_mark:
-* Managed device client cert auth. :x:
+* Managed device client cert auth. :white_check_mark:
 * Passing user info back :x:
 
 Basically, everything needed to safely expose a service to the internet. It's mostly a simple close to the app hack to get stuff out there fast

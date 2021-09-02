@@ -12,6 +12,11 @@ allow {
 	input.request.client_ip == "127.0.0.1"
 }
 
+# Any presented client certificate
+allow {
+	input.request.client_cn != ""
+}
+
 allow {
 	count(net.cidr_contains_matches(tailscale_cidrs, input.request.client_ip)) > 0
 }
