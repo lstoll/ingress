@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1.3
+
 FROM golang:1.17 AS build-env
 
 RUN mkdir -p /src/ingress
@@ -9,7 +11,7 @@ RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=0 go install ./...
+RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=0 go install ./...
 
 FROM scratch
 COPY --from=build-env /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
