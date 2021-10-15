@@ -29,14 +29,18 @@ func captureClientCert(clientCAPool *x509.CertPool, next http.Handler) http.Hand
 		for _, c := range r.TLS.PeerCertificates {
 			// first make sure we were presented with a certificate we trust
 			o := x509.VerifyOptions{
-				Roots: clientCAPool,
-				// TODO - key usage we should check?
+				Roots:         clientCAPool,
+				Intermediates: clientCAPool,
+				KeyUsages: []x509.ExtKeyUsage{
+					x509.ExtKeyUsageClientAuth,
+				},
 			}
-			if _, err := c.Verify(o); err == nil {
+			_, err := c.Verify(o)
+			if err == nil {
 				validCert = c
 				break
 			}
-			log.Printf("failed to verify cert %s, ignoring it", c.Subject.CommonName)
+			log.Printf("failed to verify cert %s, ignoring it: %v", c.Subject.CommonName, err)
 		}
 
 		if validCert != nil {
