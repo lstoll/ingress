@@ -7,7 +7,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"snirouter/snirouter"
 )
 
 func readInt16BE(data []byte, pos int) int {
@@ -17,7 +16,7 @@ func readInt16BE(data []byte, pos int) int {
 /**
 * Gets the SNI header. Returns the host if set, or an empty string, and a 'clean' connection to start TLS on
  */
-func getSNI(underConn net.Conn) (*snirouter.Conn) {
+func getSNI(underConn net.Conn) *Conn {
 	var (
 		data      = make([]byte, 1024)
 		sniHeader = ""
@@ -30,7 +29,7 @@ func getSNI(underConn net.Conn) (*snirouter.Conn) {
 	// Check if it's a TLS connection
 	if data[0] != 22 {
 		// Not TLS handshake. Replay conn, pass through.
-		return &snirouter.Conn{underConn, data[0:readLen], ""}
+		return &Conn{underConn, data[0:readLen], ""}
 	}
 
 	// Session ID length
@@ -62,7 +61,7 @@ func getSNI(underConn net.Conn) (*snirouter.Conn) {
 
 	}
 
-	return &snirouter.Conn{underConn, data[0:readLen], sniHeader}
+	return &Conn{underConn, data[0:readLen], sniHeader}
 }
 
 func handleConn(underConn net.Conn) {

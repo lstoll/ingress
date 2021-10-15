@@ -1,4 +1,4 @@
-package snirouter
+package main
 
 import (
 	"net"
@@ -8,7 +8,7 @@ type Conn struct {
 	net.Conn
 	// Data to be replayed stashed here
 	InitialData []byte
-	ServerName string
+	ServerName  string
 }
 
 func (c *Conn) Read(b []byte) (n int, err error) {
