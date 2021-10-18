@@ -17,18 +17,15 @@ import (
 	"testing"
 	"time"
 
-	"go.uber.org/zap"
+	"github.com/go-logr/logr"
+	"go.uber.org/zap/zapcore"
 	"inet.af/tcpproxy"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
 
 type connCtxKey struct{}
 
 func TestDirector(t *testing.T) {
-	logger, err := zap.NewDevelopment()
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	host1server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("host-1"))
 	}))
@@ -52,7 +49,7 @@ func TestDirector(t *testing.T) {
 	host2server.StartTLS()
 
 	d := &director{
-		logger: logger.Sugar(),
+		logger: testLogger(),
 		targets: map[string]string{
 			"host-1": host1server.Listener.Addr().String(),
 			"host-2": host2server.Listener.Addr().String(),
@@ -201,4 +198,8 @@ func mustTLSCert(t *testing.T, serverName string) *tls.Config {
 			},
 		},
 	}
+}
+
+func testLogger() logr.Logger {
+	return zap.New(zap.UseDevMode(true), zap.Level(zapcore.Level(-1*4)))
 }

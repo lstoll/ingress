@@ -4,7 +4,7 @@ import (
 	"context"
 	"net"
 
-	"go.uber.org/zap"
+	"github.com/go-logr/logr"
 	"inet.af/tcpproxy"
 )
 
@@ -15,7 +15,7 @@ var _ tcpproxy.Target = (*director)(nil)
 // MatchAny) handler. It can then dynamically look up the destination to connect
 // to, and handle the connection via  DialProxy.
 type director struct {
-	logger *zap.SugaredLogger
+	logger logr.Logger
 
 	// map of hostname -> addr to dial.
 	targets map[string]string
@@ -24,21 +24,21 @@ type director struct {
 func (d *director) HandleConn(c net.Conn) {
 	uc, ok := c.(*tcpproxy.Conn)
 	if !ok {
-		d.logger.Debugf("non *tcpproxy.Conn received: %#v", c)
+		d.logger.V(debugV).Info("non *tcpproxy.Conn received", "conn", c)
 		d.writeConnErr(c)
 		return
 	}
 
-	d.logger.Debugf("remote host: %v", uc.HostName)
+	d.logger.V(debugV).Info("remote host", "host", uc.HostName)
 
 	addr, ok := d.targets[uc.HostName]
 	if !ok || addr == "" {
-		d.logger.Debugf("no route for sni host: %v", uc.HostName)
+		d.logger.V(debugV).Info("no sni route", "host", uc.HostName)
 		d.writeConnErr(c)
 		return
 	}
 
-	d.logger.Debugf("remote host %s dialing %s", uc.HostName, addr)
+	d.logger.V(debugV).Info("dialing", "hostName", uc.HostName, "dialAddr", addr)
 
 	to := &tcpproxy.DialProxy{
 		Addr: addr,
