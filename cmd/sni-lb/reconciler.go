@@ -15,6 +15,8 @@ import (
 const (
 	hostnamesAnnotation         = "service.beta.lds.li/hostnames"
 	disableProxyProtoAnnotation = "service.beta.lds.li/disable-proxy-proto"
+
+	sniLbClass = "sni-lb"
 )
 
 type ServiceReconciler struct {
@@ -36,6 +38,10 @@ func (s *ServiceReconciler) Reconcile(ctx context.Context, req reconcile.Request
 			}
 		}
 		return reconcile.Result{}, fmt.Errorf("getting service: %w", err)
+	}
+	if svc.Spec.LoadBalancerClass == nil || *svc.Spec.LoadBalancerClass != sniLbClass {
+		// not ont we control
+		return reconcile.Result{}, nil
 	}
 	if err := s.rdb.AddService(*svc); err != nil {
 		return reconcile.Result{}, err

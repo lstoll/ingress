@@ -26,6 +26,7 @@ func TestReconcile(t *testing.T) {
 		BinaryAssetsDirectory: "../../testbin",
 	}
 
+	// KUBEBUILDER_ATTACH_CONTROL_PLANE_OUTPUT=true
 	cfg, err := testEnv.Start()
 	if err != nil {
 		t.Fatal(err)
@@ -71,13 +72,15 @@ func TestReconcile(t *testing.T) {
 			Insert: []corev1.Service{
 				{
 					ObjectMeta: metav1.ObjectMeta{
-						Namespace:   "default",
-						Name:        "service-1",
-						Annotations: map[string]string{},
+						Namespace: "default",
+						Name:      "service-1",
+						Annotations: map[string]string{
+							hostnamesAnnotation: "service1.com",
+						},
 					},
 					Spec: corev1.ServiceSpec{
 						Type:              corev1.ServiceTypeLoadBalancer,
-						LoadBalancerClass: sPtr("sni-lb"),
+						LoadBalancerClass: sPtr(sniLbClass),
 						Ports: []corev1.ServicePort{
 							{
 								Port: 1234,
