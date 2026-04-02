@@ -10,6 +10,10 @@ import (
 
 var _ tcpproxy.Target = (*director)(nil)
 
+type proxySource interface {
+	DialProxyFor(hostName string) (*tcpproxy.DialProxy, error)
+}
+
 // director is a tcpproxy.Target that works around it not handling dynamic
 // routes. it is intended to be a catch-all (i.e tcpproxy.AddSNIMatchRoute with
 // MatchAny) handler. It can then dynamically look up the destination to connect
@@ -17,8 +21,10 @@ var _ tcpproxy.Target = (*director)(nil)
 type director struct {
 	logger logr.Logger
 
-	// map of hostname -> addr to dial.
-	targets map[string]string
+	ps proxySource
+
+	// // map of hostname -> addr to dial.
+	// targets map[string]string
 }
 
 func (d *director) HandleConn(c net.Conn) {
@@ -31,20 +37,19 @@ func (d *director) HandleConn(c net.Conn) {
 
 	d.logger.V(debugV).Info("remote host", "host", uc.HostName)
 
-	addr, ok := d.targets[uc.HostName]
-	if !ok || addr == "" {
+	dp, err := d.ps.DialProxyFor(uc.HostName)
+	if err != nil {
+		d.logger.Error(err, "getting dial proxy", "host", uc.HostName)
+	}
+	if dp == nil {
 		d.logger.V(debugV).Info("no sni route", "host", uc.HostName)
 		d.writeConnErr(c)
 		return
 	}
 
-	d.logger.V(debugV).Info("dialing", "hostName", uc.HostName, "dialAddr", addr)
+	d.logger.V(debugV).Info("dialing", "hostName", uc.HostName, "dialAddr", dp.Addr)
 
-	to := &tcpproxy.DialProxy{
-		Addr: addr,
-	}
-
-	to.HandleConn(c)
+	dp.HandleConn(c)
 }
 
 // writeConnErr is used for handling conns we can't handle

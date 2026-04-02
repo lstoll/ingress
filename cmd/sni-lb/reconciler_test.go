@@ -103,6 +103,67 @@ func TestReconcile(t *testing.T) {
 				},
 			},
 		},
+		{
+			Name: "Deletion",
+			Insert: []corev1.Service{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace: "default",
+						Name:      "service-2",
+						Annotations: map[string]string{
+							hostnamesAnnotation: "service2.com",
+						},
+					},
+					Spec: corev1.ServiceSpec{
+						Type:              corev1.ServiceTypeLoadBalancer,
+						LoadBalancerClass: sPtr(sniLbClass),
+						Ports: []corev1.ServicePort{
+							{
+								Port: 1234,
+							},
+						},
+						ClusterIP: "10.0.0.102",
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace: "default",
+						Name:      "service-3",
+						Annotations: map[string]string{
+							hostnamesAnnotation: "service3.com",
+						},
+					},
+					Spec: corev1.ServiceSpec{
+						Type:              corev1.ServiceTypeLoadBalancer,
+						LoadBalancerClass: sPtr(sniLbClass),
+						Ports: []corev1.ServicePort{
+							{
+								Port: 1234,
+							},
+						},
+						ClusterIP: "10.0.0.103",
+					},
+				},
+			},
+			Delete: []types.NamespacedName{
+				{
+					Namespace: "defaultt",
+					Name:      "service-3",
+				},
+			},
+			Want: map[string]route{
+				"service2.com": {
+					Owner: types.NamespacedName{
+						Namespace: "default",
+						Name:      "service-2",
+					},
+					Proxy: &tcpproxy.DialProxy{
+						Addr:                 "10.0.0.102:1234",
+						ProxyProtocolVersion: 1,
+					},
+				},
+			},
+		},
 	} {
 		t.Run(tc.Name, func(t *testing.T) {
 			for _, is := range tc.Insert {

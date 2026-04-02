@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"os"
 
+	"github.com/oklog/run"
+	"inet.af/tcpproxy"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -12,7 +15,6 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
-	"sigs.k8s.io/controller-runtime/pkg/manager/signals"
 )
 
 const (
@@ -20,10 +22,16 @@ const (
 )
 
 func main() {
+	ctx := context.Background()
+
 	fs := flag.NewFlagSet("sni-lb", flag.ExitOnError)
 
 	zapOpts := &zap.Options{}
 	zapOpts.BindFlags(fs)
+
+	var (
+		addr = fs.String("listen", "0.0.0.0:8080", "Address to listen on")
+	)
 
 	fs.Parse(os.Args[1:])
 
@@ -48,9 +56,28 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := mgr.Start(signals.SetupSignalHandler()); err != nil {
-		log.Error(err, "could not start manager")
-		os.Exit(1)
+	var g run.Group
+
+	g.Add(run.SignalHandler(ctx, os.Interrupt))
+
+	mgrContext, mgrCancel := context.WithCancel(ctx)
+	g.Add(func() error {
+		return mgr.Start(mgrContext)
+	}, func(error) {
+		mgrCancel()
+	})
+
+	p := &tcpproxy.Proxy{}
+	g.Add(func() error {
+
+		p.AddSNIMatchRoute(*addr, MatchAny, d)
+		return p.Start()
+	}, func(error) {
+		_ = p.Close()
+	})
+
+	if err := g.Run(); err != nil {
+		log.Error(err, "running")
 	}
 }
 
