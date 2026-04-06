@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-K8S_VERSION=1.22.1
+mkdir -p testbin/crds
+curl -sLo testbin/crds/gateway-api.yaml https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.5.1/experimental-install.yaml
 
-# amd64 should be $(go env GOARCH) , but there are no arm64 bins
-curl -Lo /tmp/envtest-bins.tar.gz "https://storage.googleapis.com/kubebuilder-tools/kubebuilder-tools-${K8S_VERSION}-$(go env GOOS)-amd64.tar.gz"
-mkdir -p testbin
-tar -C testbin --strip-components=2 -zvxf /tmp/envtest-bins.tar.gz
+go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+ASSETS=$(setup-envtest use -p path --bin-dir testbin 1.30.x)
+mkdir -p testbin/bin
+cp -a $ASSETS/* testbin/bin/

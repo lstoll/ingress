@@ -25,6 +25,17 @@ import (
 
 type connCtxKey struct{}
 
+type mockProxySource struct {
+	targets map[string]string
+}
+
+func (m *mockProxySource) DialProxyFor(hostName string) (*tcpproxy.DialProxy, error) {
+	if addr, ok := m.targets[hostName]; ok {
+		return &tcpproxy.DialProxy{Addr: addr}, nil
+	}
+	return nil, nil
+}
+
 func TestDirector(t *testing.T) {
 	host1server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("host-1"))
@@ -50,9 +61,11 @@ func TestDirector(t *testing.T) {
 
 	d := &director{
 		logger: testLogger(),
-		targets: map[string]string{
-			"host-1": host1server.Listener.Addr().String(),
-			"host-2": host2server.Listener.Addr().String(),
+		ps: &mockProxySource{
+			targets: map[string]string{
+				"host-1": host1server.Listener.Addr().String(),
+				"host-2": host2server.Listener.Addr().String(),
+			},
 		},
 	}
 
@@ -97,9 +110,11 @@ func TestDirector(t *testing.T) {
 		}
 		b, err := io.ReadAll(resp.Body)
 		if err != nil {
-			t.Fatal()
+			t.Fatal(err)
 		}
-		_ = resp.Close
+		if err := resp.Body.Close(); err != nil {
+			t.Fatal(err)
+		}
 		if string(b) != "host-1" {
 			t.Errorf("wanted connection for host-1, got: %s", string(b))
 		}
@@ -126,9 +141,11 @@ func TestDirector(t *testing.T) {
 		}
 		b, err := io.ReadAll(resp.Body)
 		if err != nil {
-			t.Fatal()
+			t.Fatal(err)
 		}
-		_ = resp.Close
+		if err := resp.Body.Close(); err != nil {
+			t.Fatal(err)
+		}
 		if string(b) != "host-2" {
 			t.Errorf("wanted connection for host-2, got: %s", string(b))
 		}
@@ -154,6 +171,9 @@ func TestDirector(t *testing.T) {
 			t.Errorf("wanted %v error for bad hostname, got: %v", io.EOF, err)
 		}
 	}
+
+	host1server.Close()
+	host2server.Close()
 }
 
 func mustTLSCert(t *testing.T, serverName string) *tls.Config {
@@ -201,5 +221,5 @@ func mustTLSCert(t *testing.T, serverName string) *tls.Config {
 }
 
 func testLogger() logr.Logger {
-	return zap.New(zap.UseDevMode(true), zap.Level(zapcore.Level(-1*4)))
+	return zap.New(zap.UseDevMode(true), zap.Level(zapcore.Level(0)))
 }

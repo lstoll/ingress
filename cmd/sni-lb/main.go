@@ -7,15 +7,23 @@ import (
 
 	"github.com/oklog/run"
 	"inet.af/tcpproxy"
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	k8sscheme "k8s.io/client-go/kubernetes/scheme"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
+
+var scheme = k8sscheme.Scheme
+
+func init() {
+	utilruntime.Must(gatewayv1.AddToScheme(scheme))
+}
 
 const (
 	debugV = 4
@@ -41,15 +49,14 @@ func main() {
 
 	cfg := config.GetConfigOrDie()
 
-	cs, err := kubernetes.NewForConfig(cfg)
-	if err != nil {
-		log.Error(err, "creating kubernetes client")
-		os.Exit(1)
+	rdb := &routedb{
+		logger: log,
+		routes: map[string]route{},
 	}
 
-	mgr, err := newMgr(cfg, &ServiceReconciler{
+	mgr, err := newMgr(cfg, &TLSRouteReconciler{
 		logger: logf.Log,
-		coreV1: cs.CoreV1(),
+		rdb:    rdb,
 	})
 	if err != nil {
 		log.Error(err, "creating manager")
@@ -67,6 +74,11 @@ func main() {
 		mgrCancel()
 	})
 
+	d := &director{
+		logger: log,
+		ps:     rdb,
+	}
+
 	p := &tcpproxy.Proxy{}
 	g.Add(func() error {
 
@@ -81,15 +93,19 @@ func main() {
 	}
 }
 
-func newMgr(cfg *rest.Config, reconciler *ServiceReconciler) (manager.Manager, error) {
-	mgr, err := manager.New(cfg, manager.Options{})
+func newMgr(cfg *rest.Config, reconciler *TLSRouteReconciler) (manager.Manager, error) {
+	mgr, err := manager.New(cfg, manager.Options{
+		Scheme: scheme,
+	})
 	if err != nil {
 		return nil, err
 	}
 
+	reconciler.Client = mgr.GetClient()
+
 	err = builder.
-		ControllerManagedBy(mgr). // Create the ControllerManagedBy
-		For(&corev1.Service{}).   // ReplicaSet is the Application API
+		ControllerManagedBy(mgr).
+		For(&gatewayv1.TLSRoute{}).
 		Complete(reconciler)
 	if err != nil {
 		return nil, err
