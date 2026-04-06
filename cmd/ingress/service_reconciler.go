@@ -3,11 +3,11 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"strconv"
 	"strings"
 
-	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -35,18 +35,19 @@ const (
 
 type ServiceReconciler struct {
 	Client client.Client
-	logger logr.Logger
+	logger *slog.Logger
 	rdb    *routedb
 
 	instance string
 }
 
 func (s *ServiceReconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
-	s.logger.Info("reconcile called", "object", req.NamespacedName)
+	s.logger.Debug("reconcile called", "name", req.Name, "namespace", req.Namespace)
 
 	var svc corev1.Service
 	if err := s.Client.Get(ctx, req.NamespacedName, &svc); err != nil {
 		if apierrors.IsNotFound(err) {
+			s.logger.Debug("service not found; removing routes", "name", req.Name, "namespace", req.Namespace)
 			s.rdb.RemoveRoute(req.NamespacedName)
 			return reconcile.Result{}, nil
 		}
@@ -54,12 +55,15 @@ func (s *ServiceReconciler) Reconcile(ctx context.Context, req reconcile.Request
 	}
 
 	if !s.managesService(&svc) {
+		s.logger.Debug("service does not match instance; removing routes",
+			"name", req.Name, "namespace", req.Namespace, "instance", s.instance)
 		s.rdb.RemoveRoute(req.NamespacedName)
 		return reconcile.Result{}, nil
 	}
 
 	mode := svc.Annotations[annMode]
 	if mode != modeTLSPassthrough && mode != modeTLSTermination && mode != modeHTTPS {
+		s.logger.Debug("unsupported service mode; removing routes", "mode", mode, "name", req.Name, "namespace", req.Namespace)
 		s.rdb.RemoveRoute(req.NamespacedName)
 		return reconcile.Result{}, nil
 	}
@@ -70,11 +74,13 @@ func (s *ServiceReconciler) Reconcile(ctx context.Context, req reconcile.Request
 	}
 	hostnames := splitCSV(svc.Annotations[hostnamesAnn])
 	if len(hostnames) == 0 {
+		s.logger.Debug("service has no hostnames; removing routes", "annotation", hostnamesAnn, "name", req.Name, "namespace", req.Namespace)
 		s.rdb.RemoveRoute(req.NamespacedName)
 		return reconcile.Result{}, nil
 	}
 
 	if svc.Spec.ClusterIP == "" || svc.Spec.ClusterIP == corev1.ClusterIPNone || len(svc.Spec.Ports) == 0 {
+		s.logger.Debug("service has no routable cluster ip/ports; removing routes", "name", req.Name, "namespace", req.Namespace)
 		s.rdb.RemoveRoute(req.NamespacedName)
 		return reconcile.Result{}, nil
 	}
@@ -85,13 +91,15 @@ func (s *ServiceReconciler) Reconcile(ctx context.Context, req reconcile.Request
 	var oidcCfg *oidcConfig
 	if mode == modeHTTPS && strings.EqualFold(svc.Annotations[annAuthMode], authModeOIDC) {
 		if !strings.EqualFold(svc.Annotations[annOIDCDynamicClient], "true") {
-			s.logger.Info("ignoring service: oidc auth requires dynamic client registration", "service", req.NamespacedName)
+			s.logger.Info("ignoring service: oidc auth requires dynamic client registration",
+				"name", req.Name, "namespace", req.Namespace)
 			s.rdb.RemoveRoute(req.NamespacedName)
 			return reconcile.Result{}, nil
 		}
 		issuer := strings.TrimSpace(svc.Annotations[annOIDCIssuer])
 		if issuer == "" {
-			s.logger.Info("ignoring service: missing oidc issuer for auth mode OIDC", "service", req.NamespacedName)
+			s.logger.Info("ignoring service: missing oidc issuer for auth mode OIDC",
+				"name", req.Name, "namespace", req.Namespace)
 			s.rdb.RemoveRoute(req.NamespacedName)
 			return reconcile.Result{}, nil
 		}
@@ -106,6 +114,14 @@ func (s *ServiceReconciler) Reconcile(ctx context.Context, req reconcile.Request
 	if err := s.rdb.SetRoute(req.NamespacedName, hostnames, targetAddr, mode, proxyProto, oidcCfg); err != nil {
 		return reconcile.Result{}, err
 	}
+	s.logger.Info("configured service route",
+		"name", req.Name,
+		"namespace", req.Namespace,
+		"mode", mode,
+		"hostnames", len(hostnames),
+		"target", targetAddr,
+		"oidc", oidcCfg != nil,
+	)
 	return reconcile.Result{}, nil
 }
 

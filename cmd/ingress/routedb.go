@@ -3,12 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"sync"
 
-	"github.com/go-logr/logr"
 	"inet.af/tcpproxy"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -24,7 +24,7 @@ type route struct {
 }
 
 type routedb struct {
-	logger logr.Logger
+	logger *slog.Logger
 	ctx    context.Context
 
 	// map of hostnames to route
@@ -39,6 +39,7 @@ func (r *routedb) SetRoute(owner types.NamespacedName, hostnames []string, targe
 	// Check for conflicts first
 	for _, h := range hostnames {
 		if rt, ok := r.routes[h]; ok && rt.Owner != owner {
+			r.logger.Warn("route conflict", "hostname", h, "existing_owner", rt.Owner.String(), "new_owner", owner.String())
 			return fmt.Errorf("host %s already in use", h)
 		}
 	}
@@ -47,6 +48,7 @@ func (r *routedb) SetRoute(owner types.NamespacedName, hostnames []string, targe
 	for h, rt := range r.routes {
 		if rt.Owner == owner {
 			delete(r.routes, h)
+			r.logger.Debug("removed stale route", "owner", owner.String(), "hostname", h)
 		}
 	}
 
@@ -94,6 +96,7 @@ func (r *routedb) SetRoute(owner types.NamespacedName, hostnames []string, targe
 			HTTPHandler: rt.HTTPHandler,
 			OIDC:       rt.OIDC,
 		}
+		r.logger.Info("set route", "hostname", h, "owner", owner.String(), "mode", mode, "target", targetAddr, "proxy_proto", proxyProto)
 	}
 
 	return nil
@@ -106,6 +109,7 @@ func (r *routedb) RemoveRoute(owner types.NamespacedName) {
 	for h, rt := range r.routes {
 		if rt.Owner == owner {
 			delete(r.routes, h)
+			r.logger.Info("removed route", "owner", owner.String(), "hostname", h)
 		}
 	}
 }

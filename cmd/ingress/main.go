@@ -4,11 +4,16 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
+	"strings"
 
+	"github.com/go-logr/logr/slogr"
 	"github.com/oklog/run"
+	"golang.org/x/term"
 	"inet.af/tcpproxy"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/rest"
@@ -16,7 +21,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	k8sscheme "k8s.io/client-go/kubernetes/scheme"
@@ -33,9 +37,6 @@ func main() {
 
 	fs := flag.NewFlagSet("ingress", flag.ExitOnError)
 
-	zapOpts := &zap.Options{}
-	zapOpts.BindFlags(fs)
-
 	var (
 		tlsListen         = fs.String("tls-listen", "0.0.0.0:443", "TLS listener address")
 		httpListen        = fs.String("http-listen", "", "Optional plain HTTP listener for HTTPS redirects")
@@ -44,17 +45,31 @@ func main() {
 		watchNamespace    = fs.String("watch-namespace", "", "Optional namespace to watch services in. Empty means all namespaces")
 		certMode          = fs.String("cert-mode", certModeSelfSigned, "Certificate mode for terminated TLS routes: self-signed or autocert")
 		autocertSecret    = fs.String("autocert-secret", "", "namespace/name secret for autocert cache (required when --cert-mode=autocert)")
+		logLevel          = fs.String("log-level", envOrDefault("INGRESS_LOG_LEVEL", "info"), "Log level: debug, info, warn, error")
 	)
 
 	fs.Parse(os.Args[1:])
 
-	logf.SetLogger(zap.New(zap.UseFlagOptions(zapOpts)))
-
-	var log = logf.Log.WithName("ingress")
-	if err := validateStartupConfig(*instance, *certMode, *autocertSecret); err != nil {
-		log.Error(err, "invalid startup configuration")
+	appLogger, err := setupLogger(*logLevel, os.Stdout, term.IsTerminal(int(os.Stdout.Fd())))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "invalid log level %q: %v\n", *logLevel, err)
 		os.Exit(2)
 	}
+	slog.SetDefault(appLogger)
+	logf.SetLogger(slogr.NewLogr(appLogger.With("component", "controller-runtime").Handler()))
+
+	log := appLogger.With("component", "ingress")
+	if err := validateStartupConfig(*instance, *certMode, *autocertSecret); err != nil {
+		log.Error("invalid startup configuration", "error", err)
+		os.Exit(2)
+	}
+	log.Info("starting ingress",
+		"instance", *instance,
+		"tls_listen", *tlsListen,
+		"http_listen", *httpListen,
+		"watch_namespace", *watchNamespace,
+		"cert_mode", *certMode,
+	)
 
 	cfg := config.GetConfigOrDie()
 
@@ -74,17 +89,18 @@ func main() {
 		},
 	})
 	if err != nil {
-		log.Error(err, "creating certificate provider")
+		log.Error("creating certificate provider", "error", err)
 		os.Exit(1)
 	}
+	log.Info("certificate provider initialized")
 
 	mgr, err := newMgr(cfg, *watchNamespace, &ServiceReconciler{
-		logger:   logf.Log,
+		logger:   log.With("component", "service-reconciler"),
 		rdb:      rdb,
 		instance: *instance,
 	})
 	if err != nil {
-		log.Error(err, "creating manager")
+		log.Error("creating manager", "error", err)
 		os.Exit(1)
 	}
 
@@ -100,7 +116,7 @@ func main() {
 	})
 
 	d := &director{
-		logger: log,
+		logger: log.With("component", "director"),
 		ps:     rdb,
 		cp:     cp,
 	}
@@ -108,6 +124,7 @@ func main() {
 	p := &tcpproxy.Proxy{}
 	proxyContext, proxyCancel := context.WithCancel(ctx)
 	g.Add(func() error {
+		log.Info("starting TLS proxy listener", "addr", *tlsListen)
 		p.AddSNIMatchRoute(*tlsListen, MatchAny, d)
 		if err := p.Start(); err != nil {
 			return err
@@ -128,6 +145,7 @@ func main() {
 					host = h
 				}
 				if !rdb.HasHost(host) {
+					log.Debug("http redirect miss", "host", host, "path", r.URL.Path)
 					http.NotFound(w, r)
 					return
 				}
@@ -135,10 +153,12 @@ func main() {
 				if *httpsRedirectPort != "" {
 					redirectHost = net.JoinHostPort(host, *httpsRedirectPort)
 				}
+				log.Debug("redirecting http to https", "host", host, "target_host", redirectHost, "path", r.URL.Path)
 				http.Redirect(w, r, "https://"+redirectHost+r.URL.RequestURI(), http.StatusPermanentRedirect)
 			}),
 		}
 		g.Add(func() error {
+			log.Info("starting HTTP redirect listener", "addr", *httpListen)
 			return hs.ListenAndServe()
 		}, func(error) {
 			_ = hs.Close()
@@ -146,8 +166,37 @@ func main() {
 	}
 
 	if err := g.Run(); err != nil {
-		log.Error(err, "running")
+		log.Error("running", "error", err)
 	}
+}
+
+func setupLogger(level string, out io.Writer, interactive bool) (*slog.Logger, error) {
+	var slogLevel slog.Level
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "debug":
+		slogLevel = slog.LevelDebug
+	case "info", "":
+		slogLevel = slog.LevelInfo
+	case "warn", "warning":
+		slogLevel = slog.LevelWarn
+	case "error":
+		slogLevel = slog.LevelError
+	default:
+		return nil, fmt.Errorf("unsupported log level")
+	}
+
+	opts := &slog.HandlerOptions{Level: slogLevel}
+	if interactive {
+		return slog.New(slog.NewTextHandler(out, opts)), nil
+	}
+	return slog.New(slog.NewJSONHandler(out, opts)), nil
+}
+
+func envOrDefault(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
 func validateStartupConfig(instance, certMode, autocertSecret string) error {
 	if instance == "" {

@@ -5,11 +5,11 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"sync"
 
-	"github.com/go-logr/logr"
 	"inet.af/tcpproxy"
 )
 
@@ -25,7 +25,7 @@ type proxySource interface {
 // MatchAny) handler. It can then dynamically look up the destination to connect
 // to, and handle the connection via  DialProxy.
 type director struct {
-	logger logr.Logger
+	logger *slog.Logger
 
 	ps proxySource
 	cp CertProvider
@@ -37,22 +37,22 @@ type director struct {
 func (d *director) HandleConn(c net.Conn) {
 	uc, ok := c.(*tcpproxy.Conn)
 	if !ok {
-		d.logger.V(debugV).Info("non *tcpproxy.Conn received", "conn", c)
+		d.logger.Debug("non *tcpproxy.Conn received")
 		d.writeConnErr(c)
 		return
 	}
 
-	d.logger.V(debugV).Info("remote host", "host", uc.HostName)
+	d.logger.Debug("incoming connection", "host", uc.HostName)
 
 	rt, ok := d.ps.RouteFor(uc.HostName)
 	if !ok {
-		d.logger.V(debugV).Info("no sni route", "host", uc.HostName)
+		d.logger.Debug("no sni route", "host", uc.HostName)
 		d.writeConnErr(c)
 		return
 	}
 	if rt.Mode == modeTLSTermination || rt.Mode == modeHTTPS {
 		if err := d.handleTerminateRoute(uc, rt); err != nil {
-			d.logger.Error(err, "handling terminated tls route", "host", uc.HostName)
+			d.logger.Error("handling terminated tls route", "host", uc.HostName, "error", err)
 			d.writeConnErr(c)
 		}
 		return
@@ -60,17 +60,17 @@ func (d *director) HandleConn(c net.Conn) {
 
 	dp, err := d.ps.DialProxyFor(uc.HostName)
 	if err != nil {
-		d.logger.Error(err, "getting dial proxy", "host", uc.HostName)
+		d.logger.Error("getting dial proxy", "host", uc.HostName, "error", err)
 		d.writeConnErr(c)
 		return
 	}
 	if dp == nil {
-		d.logger.V(debugV).Info("no dial proxy for sni route", "host", uc.HostName)
+		d.logger.Debug("no dial proxy for sni route", "host", uc.HostName)
 		d.writeConnErr(c)
 		return
 	}
 
-	d.logger.V(debugV).Info("dialing", "hostName", uc.HostName, "dialAddr", dp.Addr)
+	d.logger.Debug("dialing passthrough target", "host", uc.HostName, "target", dp.Addr)
 
 	dp.HandleConn(c)
 }

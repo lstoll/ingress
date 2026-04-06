@@ -10,6 +10,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"log/slog"
 	"math/big"
 	"net"
 	"net/http"
@@ -17,10 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-logr/logr"
-	"go.uber.org/zap/zapcore"
 	"inet.af/tcpproxy"
-	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
 
 type connCtxKey struct{}
@@ -295,6 +293,6 @@ func mustTLSCert(t *testing.T, serverName string) *tls.Config {
 	}
 }
 
-func testLogger() logr.Logger {
-	return zap.New(zap.UseDevMode(true), zap.Level(zapcore.Level(0)))
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }

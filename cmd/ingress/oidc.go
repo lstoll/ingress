@@ -55,6 +55,7 @@ func buildMiddlewareForHost(ctx context.Context, incomingHostname string, cfg oi
 		if time.Since(lastRefreshed) < middlewareRefreshInterval {
 			return nil
 		}
+		slog.Info("oidc: refreshing middleware", "hostname", incomingHostname, "issuer", cfg.Issuer)
 		clientID, clientSecret, err := oidcClientCredentials(ctx, cfg, incomingHostname, redirectURL)
 		if err != nil {
 			return err
@@ -74,6 +75,7 @@ func buildMiddlewareForHost(ctx context.Context, incomingHostname string, cfg oi
 				}
 
 				if cfg.RequireGroup != "" && !claimsHasGroup(cl, cfg.RequireGroup) {
+					slog.Warn("oidc: request denied, required group missing", "hostname", incomingHostname, "required_group", cfg.RequireGroup)
 					http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 					return
 				}
