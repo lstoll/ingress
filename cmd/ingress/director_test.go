@@ -26,12 +26,17 @@ import (
 type connCtxKey struct{}
 
 type mockProxySource struct {
-	targets map[string]string
+	routes map[string]route
+}
+
+func (m *mockProxySource) RouteFor(hostName string) (route, bool) {
+	rt, ok := m.routes[hostName]
+	return rt, ok
 }
 
 func (m *mockProxySource) DialProxyFor(hostName string) (*tcpproxy.DialProxy, error) {
-	if addr, ok := m.targets[hostName]; ok {
-		return &tcpproxy.DialProxy{Addr: addr}, nil
+	if rt, ok := m.routes[hostName]; ok {
+		return rt.Proxy, nil
 	}
 	return nil, nil
 }
@@ -62,9 +67,9 @@ func TestDirector(t *testing.T) {
 	d := &director{
 		logger: testLogger(),
 		ps: &mockProxySource{
-			targets: map[string]string{
-				"host-1": host1server.Listener.Addr().String(),
-				"host-2": host2server.Listener.Addr().String(),
+			routes: map[string]route{
+				"host-1": {TargetAddr: host1server.Listener.Addr().String(), Proxy: &tcpproxy.DialProxy{Addr: host1server.Listener.Addr().String()}},
+				"host-2": {TargetAddr: host2server.Listener.Addr().String(), Proxy: &tcpproxy.DialProxy{Addr: host2server.Listener.Addr().String()}},
 			},
 		},
 	}
@@ -174,6 +179,76 @@ func TestDirector(t *testing.T) {
 
 	host1server.Close()
 	host2server.Close()
+}
+
+func TestDirectorTLSTerminate(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("terminated"))
+	}))
+	defer backend.Close()
+
+	addr := backend.Listener.Addr().String()
+
+	cp, err := newCertProvider(certModeSelfSigned)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	d := &director{
+		logger: testLogger(),
+		cp:     cp,
+		ps: &mockProxySource{
+			routes: map[string]route{
+				"app.localtest.me": {
+					TargetAddr:   addr,
+					TerminateTLS: true,
+				},
+			},
+		},
+	}
+
+	tl, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, lp, err := net.SplitHostPort(tl.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = tl.Close()
+
+	proxyAddr := net.JoinHostPort("localhost", lp)
+	p := &tcpproxy.Proxy{}
+	p.AddSNIMatchRoute(proxyAddr, MatchAny, d)
+	if err := p.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true,
+				ServerName:         "app.localtest.me",
+			},
+		},
+	}
+	req, err := http.NewRequest("GET", "https://"+proxyAddr, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "terminated" {
+		t.Fatalf("expected terminated response, got %q", string(body))
+	}
 }
 
 func mustTLSCert(t *testing.T, serverName string) *tls.Config {

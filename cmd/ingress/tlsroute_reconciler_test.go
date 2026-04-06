@@ -172,6 +172,8 @@ func TestTLSRouteReconcile(t *testing.T) {
 				Namespace: svcNamespace,
 				Name:      tlsRouteName,
 			},
+			TargetAddr:   "10.0.0.99:1234",
+			TerminateTLS: false,
 			Proxy: &tcpproxy.DialProxy{
 				Addr:                 "10.0.0.99:1234",
 				ProxyProtocolVersion: 1,

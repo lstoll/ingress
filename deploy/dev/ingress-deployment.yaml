@@ -23,6 +23,7 @@ spec:
             - --gateway-name=ingress
             - --gateway-namespace=ingress-dev
             - --listener-name=tls
+            - --cert-mode=self-signed
           ports:
             - containerPort: 443
               name: tls

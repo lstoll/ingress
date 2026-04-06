@@ -23,6 +23,7 @@ type TLSRouteReconciler struct {
 	gatewayName      string
 	gatewayNamespace string
 	listenerName     string
+	terminateTLS     bool
 }
 
 func (s *TLSRouteReconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
@@ -105,7 +106,7 @@ func (s *TLSRouteReconciler) Reconcile(ctx context.Context, req reconcile.Reques
 		proxyProto = false
 	}
 
-	if err := s.rdb.SetRoute(req.NamespacedName, hostnames, targetAddr, proxyProto); err != nil {
+	if err := s.rdb.SetRoute(req.NamespacedName, hostnames, targetAddr, proxyProto, s.terminateTLS); err != nil {
 		s.logger.Error(err, "adding TLSRoute to rdb", "object", req.NamespacedName)
 		return reconcile.Result{}, err
 	}

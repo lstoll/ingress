@@ -10,8 +10,10 @@ import (
 )
 
 type route struct {
-	Owner types.NamespacedName
-	Proxy *tcpproxy.DialProxy
+	Owner        types.NamespacedName
+	TargetAddr   string
+	TerminateTLS bool
+	Proxy        *tcpproxy.DialProxy
 }
 
 type routedb struct {
@@ -22,7 +24,7 @@ type routedb struct {
 	routesMu sync.RWMutex
 }
 
-func (r *routedb) SetRoute(owner types.NamespacedName, hostnames []string, targetAddr string, proxyProto bool) error {
+func (r *routedb) SetRoute(owner types.NamespacedName, hostnames []string, targetAddr string, proxyProto bool, terminateTLS bool) error {
 	r.routesMu.Lock()
 	defer r.routesMu.Unlock()
 
@@ -46,12 +48,22 @@ func (r *routedb) SetRoute(owner types.NamespacedName, hostnames []string, targe
 	}
 
 	for _, h := range hostnames {
-		r.routes[h] = route{
-			Owner: owner,
-			Proxy: &tcpproxy.DialProxy{
+		rt := route{
+			Owner:        owner,
+			TargetAddr:   targetAddr,
+			TerminateTLS: terminateTLS,
+		}
+		if !terminateTLS {
+			rt.Proxy = &tcpproxy.DialProxy{
 				Addr:                 targetAddr,
 				ProxyProtocolVersion: ppVersion,
-			},
+			}
+		}
+		r.routes[h] = route{
+			Owner:        rt.Owner,
+			TargetAddr:   rt.TargetAddr,
+			TerminateTLS: rt.TerminateTLS,
+			Proxy:        rt.Proxy,
 		}
 	}
 
@@ -69,11 +81,16 @@ func (r *routedb) RemoveRoute(owner types.NamespacedName) {
 	}
 }
 
-func (r *routedb) DialProxyFor(hostName string) (*tcpproxy.DialProxy, error) {
+func (r *routedb) RouteFor(hostName string) (route, bool) {
 	r.routesMu.RLock()
 	defer r.routesMu.RUnlock()
 
 	rt, ok := r.routes[hostName]
+	return rt, ok
+}
+
+func (r *routedb) DialProxyFor(hostName string) (*tcpproxy.DialProxy, error) {
+	rt, ok := r.RouteFor(hostName)
 	if !ok {
 		return nil, nil
 	}

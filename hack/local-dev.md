@@ -29,6 +29,8 @@ This script:
 - writes kubeconfig to `.kube/config`
 - installs Gateway API standard CRDs (server-side apply)
 
+The local deployment currently runs `ingress` with `--cert-mode=self-signed` as groundwork for terminated TLS routes.
+
 ## Deploy
 
 ```bash

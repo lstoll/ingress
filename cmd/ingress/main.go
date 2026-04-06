@@ -49,6 +49,7 @@ func main() {
 		gatewayNamespace = fs.String("gateway-namespace", defaultNamespace(), "Gateway namespace")
 		listenerName     = fs.String("listener-name", "", "Optional Gateway listener name to scope routing and listen address selection")
 		watchNamespace   = fs.String("watch-namespace", "", "Optional namespace to watch routes/services in. Empty means all namespaces")
+		certMode         = fs.String("cert-mode", certModeSelfSigned, "Certificate mode for terminated TLS routes: self-signed or autocert")
 	)
 
 	fs.Parse(os.Args[1:])
@@ -62,7 +63,7 @@ func main() {
 	}
 
 	cfg := config.GetConfigOrDie()
-	resolvedListenAddr, err := resolveListenAddr(ctx, cfg, types.NamespacedName{
+	resolvedListenAddr, terminateTLS, err := resolveListenerConfig(ctx, cfg, types.NamespacedName{
 		Namespace: *gatewayNamespace,
 		Name:      *gatewayName,
 	}, *listenerName, *addr)
@@ -75,6 +76,11 @@ func main() {
 		logger: log,
 		routes: map[string]route{},
 	}
+	cp, err := newCertProvider(*certMode)
+	if err != nil {
+		log.Error(err, "creating certificate provider")
+		os.Exit(1)
+	}
 
 	mgr, err := newMgr(cfg, *watchNamespace, &TLSRouteReconciler{
 		logger:           logf.Log,
@@ -82,6 +88,7 @@ func main() {
 		gatewayName:      *gatewayName,
 		gatewayNamespace: *gatewayNamespace,
 		listenerName:     *listenerName,
+		terminateTLS:     terminateTLS,
 	})
 	if err != nil {
 		log.Error(err, "creating manager")
@@ -102,6 +109,7 @@ func main() {
 	d := &director{
 		logger: log,
 		ps:     rdb,
+		cp:     cp,
 	}
 
 	p := &tcpproxy.Proxy{}
@@ -131,19 +139,19 @@ func defaultNamespace() string {
 	return "default"
 }
 
-func resolveListenAddr(ctx context.Context, cfg *rest.Config, gatewayNN types.NamespacedName, listenerName, explicitListenAddr string) (string, error) {
+func resolveListenerConfig(ctx context.Context, cfg *rest.Config, gatewayNN types.NamespacedName, listenerName, explicitListenAddr string) (string, bool, error) {
 	if explicitListenAddr != "" {
-		return explicitListenAddr, nil
+		return explicitListenAddr, false, nil
 	}
 
 	c, err := client.New(cfg, client.Options{Scheme: scheme})
 	if err != nil {
-		return "", fmt.Errorf("creating client: %w", err)
+		return "", false, fmt.Errorf("creating client: %w", err)
 	}
 
 	var gw gatewayv1.Gateway
 	if err := c.Get(ctx, gatewayNN, &gw); err != nil {
-		return "", fmt.Errorf("getting gateway %s: %w", gatewayNN, err)
+		return "", false, fmt.Errorf("getting gateway %s: %w", gatewayNN, err)
 	}
 
 	for _, listener := range gw.Spec.Listeners {
@@ -153,13 +161,17 @@ func resolveListenAddr(ctx context.Context, cfg *rest.Config, gatewayNN types.Na
 		if listener.Protocol != gatewayv1.TLSProtocolType {
 			continue
 		}
-		return net.JoinHostPort("0.0.0.0", strconv.Itoa(int(listener.Port))), nil
+		terminateTLS := false
+		if listener.TLS != nil && listener.TLS.Mode != nil && *listener.TLS.Mode == gatewayv1.TLSModeTerminate {
+			terminateTLS = true
+		}
+		return net.JoinHostPort("0.0.0.0", strconv.Itoa(int(listener.Port))), terminateTLS, nil
 	}
 
 	if listenerName == "" {
-		return "", fmt.Errorf("gateway %s has no TLS listeners", gatewayNN)
+		return "", false, fmt.Errorf("gateway %s has no TLS listeners", gatewayNN)
 	}
-	return "", fmt.Errorf("gateway %s has no TLS listener named %q", gatewayNN, listenerName)
+	return "", false, fmt.Errorf("gateway %s has no TLS listener named %q", gatewayNN, listenerName)
 }
 
 func newMgr(cfg *rest.Config, watchNamespace string, reconciler *TLSRouteReconciler) (manager.Manager, error) {
