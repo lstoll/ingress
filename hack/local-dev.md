@@ -42,6 +42,32 @@ Skaffold builds the local `ingress` image and applies `deploy/dev` manifests (Ga
 By default, the ingress process watches routes cluster-wide and filters to the configured Gateway via `parentRefs`.
 The demo `TLSRoute` disables proxy-protocol so a plain nginx TLS backend can terminate the connection directly.
 
+To test ingress-side TLS termination (TLS at ingress, HTTP backend), use:
+
+```bash
+skaffold run -p terminate
+```
+
+This uses `deploy/dev-terminate`, switches the Gateway listener to `Terminate`, and points the backend to plain HTTP on port `8080`.
+
+## Production-style autocert mode
+
+For real certificate issuance, run ingress with `--cert-mode=autocert` and provide a cache secret:
+
+```bash
+/ingress \
+  --gateway-name=ingress \
+  --gateway-namespace=ingress-dev \
+  --listener-name=tls \
+  --cert-mode=autocert \
+  --autocert-secret=ingress-dev/autocert-cache
+```
+
+Notes:
+
+- `--autocert-secret` is required in `namespace/name` format.
+- ACME/TLS-ALPN validation requires external reachability on port `443` for the requested hostnames.
+
 ## Verify
 
 ```bash
@@ -62,6 +88,12 @@ Expected response body:
 
 ```text
 hello from demo backend (tls)
+```
+
+When using `-p terminate`, expected response body becomes:
+
+```text
+hello from demo backend (http)
 ```
 
 ## Tear down

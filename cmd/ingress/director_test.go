@@ -189,7 +189,7 @@ func TestDirectorTLSTerminate(t *testing.T) {
 
 	addr := backend.Listener.Addr().String()
 
-	cp, err := newCertProvider(certModeSelfSigned)
+	cp, err := newCertProvider(certModeSelfSigned, certProviderConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}

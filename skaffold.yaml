@@ -16,3 +16,9 @@ manifests:
       - deploy/dev
 deploy:
   kubectl: {}
+profiles:
+  - name: terminate
+    manifests:
+      kustomize:
+        paths:
+          - deploy/dev-terminate

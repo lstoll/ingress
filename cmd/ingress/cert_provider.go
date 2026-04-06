@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -10,8 +11,13 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/crypto/acme/autocert"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 )
 
 const (
@@ -22,7 +28,13 @@ const (
 // CertProvider is the abstraction used to source server certificates for
 // terminated TLS connections.
 type CertProvider interface {
-	GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error)
+	TLSConfig() *tls.Config
+}
+
+type certProviderConfig struct {
+	KubeConfig     *rest.Config
+	AutocertSecret string
+	HostPolicy     autocert.HostPolicy
 }
 
 type selfSignedCertProvider struct {
@@ -30,20 +42,27 @@ type selfSignedCertProvider struct {
 	certs map[string]*tls.Certificate
 }
 
-func newCertProvider(mode string) (CertProvider, error) {
+func newCertProvider(mode string, cfg certProviderConfig) (CertProvider, error) {
 	switch mode {
 	case certModeSelfSigned:
 		return &selfSignedCertProvider{
 			certs: map[string]*tls.Certificate{},
 		}, nil
 	case certModeAutocert:
-		return nil, fmt.Errorf("cert mode %q not implemented yet", certModeAutocert)
+		return newAutocertProvider(cfg)
 	default:
 		return nil, fmt.Errorf("unsupported cert mode %q", mode)
 	}
 }
 
-func (p *selfSignedCertProvider) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+func (p *selfSignedCertProvider) TLSConfig() *tls.Config {
+	return &tls.Config{
+		MinVersion:     tls.VersionTLS12,
+		GetCertificate: p.getCertificate,
+	}
+}
+
+func (p *selfSignedCertProvider) getCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	host := "localhost"
 	if hello != nil && hello.ServerName != "" {
 		host = hello.ServerName
@@ -106,4 +125,57 @@ func generateSelfSignedCert(host string) (*tls.Certificate, error) {
 		PrivateKey:  priv,
 	}
 	return cert, nil
+}
+
+type autocertCertProvider struct {
+	manager *autocert.Manager
+}
+
+func newAutocertProvider(cfg certProviderConfig) (CertProvider, error) {
+	if cfg.KubeConfig == nil {
+		return nil, fmt.Errorf("kubernetes config is required for autocert mode")
+	}
+	secretNamespace, secretName, err := splitNamespacedName(cfg.AutocertSecret)
+	if err != nil {
+		return nil, err
+	}
+
+	clientset, err := kubernetes.NewForConfig(cfg.KubeConfig)
+	if err != nil {
+		return nil, fmt.Errorf("building kubernetes clientset: %w", err)
+	}
+
+	hostPolicy := cfg.HostPolicy
+	if hostPolicy == nil {
+		hostPolicy = func(context.Context, string) error { return nil }
+	}
+
+	return &autocertCertProvider{
+		manager: &autocert.Manager{
+			Prompt: autocert.AcceptTOS,
+			Cache: &autocertCache{
+				clientset:       clientset,
+				secretNamespace: secretNamespace,
+				secretName:      secretName,
+			},
+			HostPolicy: hostPolicy,
+		},
+	}, nil
+}
+
+func (p *autocertCertProvider) TLSConfig() *tls.Config {
+	cfg := p.manager.TLSConfig()
+	cfg.MinVersion = tls.VersionTLS12
+	return cfg
+}
+
+func splitNamespacedName(p string) (namespace, name string, err error) {
+	sp := strings.Split(p, "/")
+	if len(sp) != 2 {
+		return "", "", fmt.Errorf("splitting %s on / yielded %d items, not 2", p, len(sp))
+	}
+	if sp[0] == "" || sp[1] == "" {
+		return "", "", fmt.Errorf("invalid namespaced name %q", p)
+	}
+	return sp[0], sp[1], nil
 }

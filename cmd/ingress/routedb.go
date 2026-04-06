@@ -89,6 +89,13 @@ func (r *routedb) RouteFor(hostName string) (route, bool) {
 	return rt, ok
 }
 
+func (r *routedb) HasHost(hostName string) bool {
+	r.routesMu.RLock()
+	defer r.routesMu.RUnlock()
+	_, ok := r.routes[hostName]
+	return ok
+}
+
 func (r *routedb) DialProxyFor(hostName string) (*tcpproxy.DialProxy, error) {
 	rt, ok := r.RouteFor(hostName)
 	if !ok {

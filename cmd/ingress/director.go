@@ -78,10 +78,7 @@ func (d *director) handleTerminateRoute(c *tcpproxy.Conn, rt route) error {
 		return io.EOF
 	}
 
-	tlsConn := tls.Server(c, &tls.Config{
-		GetCertificate: d.cp.GetCertificate,
-		MinVersion:     tls.VersionTLS12,
-	})
+	tlsConn := tls.Server(c, d.cp.TLSConfig())
 	if err := tlsConn.Handshake(); err != nil {
 		return err
 	}

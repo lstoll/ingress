@@ -2,8 +2,9 @@ package main
 
 import (
 	"context"
-	"fmt"
+	"crypto/tls"
 	"flag"
+	"fmt"
 	"net"
 	"os"
 	"strconv"
@@ -12,9 +13,9 @@ import (
 	"inet.af/tcpproxy"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -50,6 +51,7 @@ func main() {
 		listenerName     = fs.String("listener-name", "", "Optional Gateway listener name to scope routing and listen address selection")
 		watchNamespace   = fs.String("watch-namespace", "", "Optional namespace to watch routes/services in. Empty means all namespaces")
 		certMode         = fs.String("cert-mode", certModeSelfSigned, "Certificate mode for terminated TLS routes: self-signed or autocert")
+		autocertSecret   = fs.String("autocert-secret", "", "namespace/name secret for autocert cache (required when --cert-mode=autocert)")
 	)
 
 	fs.Parse(os.Args[1:])
@@ -57,8 +59,8 @@ func main() {
 	logf.SetLogger(zap.New(zap.UseFlagOptions(zapOpts)))
 
 	var log = logf.Log.WithName("ingress")
-	if *gatewayName == "" {
-		log.Error(fmt.Errorf("missing required flag"), "--gateway-name must be set")
+	if err := validateStartupConfig(*gatewayName, *certMode, *autocertSecret); err != nil {
+		log.Error(err, "invalid startup configuration")
 		os.Exit(2)
 	}
 
@@ -76,7 +78,16 @@ func main() {
 		logger: log,
 		routes: map[string]route{},
 	}
-	cp, err := newCertProvider(*certMode)
+	cp, err := newCertProvider(*certMode, certProviderConfig{
+		KubeConfig:     cfg,
+		AutocertSecret: *autocertSecret,
+		HostPolicy: func(_ context.Context, host string) error {
+			if rdb.HasHost(host) {
+				return nil
+			}
+			return fmt.Errorf("host %q is not configured by any attached route", host)
+		},
+	})
 	if err != nil {
 		log.Error(err, "creating certificate provider")
 		os.Exit(1)
@@ -132,11 +143,34 @@ func main() {
 	}
 }
 
+func tlsServeConn(cp CertProvider, c net.Conn) error {
+	tlsConn := tls.Server(c, cp.TLSConfig())
+	if err := tlsConn.Handshake(); err != nil {
+		return err
+	}
+	return tlsConn.Close()
+}
+
 func defaultNamespace() string {
 	if ns := os.Getenv("POD_NAMESPACE"); ns != "" {
 		return ns
 	}
 	return "default"
+}
+
+func validateStartupConfig(gatewayName, certMode, autocertSecret string) error {
+	if gatewayName == "" {
+		return fmt.Errorf("--gateway-name must be set")
+	}
+	if certMode == certModeAutocert && autocertSecret == "" {
+		return fmt.Errorf("--autocert-secret must be set when --cert-mode=autocert")
+	}
+	if certMode == certModeAutocert {
+		if _, _, err := splitNamespacedName(autocertSecret); err != nil {
+			return fmt.Errorf("invalid --autocert-secret, expected namespace/name: %w", err)
+		}
+	}
+	return nil
 }
 
 func resolveListenerConfig(ctx context.Context, cfg *rest.Config, gatewayNN types.NamespacedName, listenerName, explicitListenAddr string) (string, bool, error) {
