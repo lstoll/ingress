@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"sync"
@@ -17,17 +19,20 @@ type route struct {
 	Mode         string
 	Proxy        *tcpproxy.DialProxy
 	HTTPProxy    *httputil.ReverseProxy
+	HTTPHandler  http.Handler
+	OIDC         *oidcConfig
 }
 
 type routedb struct {
 	logger logr.Logger
+	ctx    context.Context
 
 	// map of hostnames to route
 	routes   map[string]route
 	routesMu sync.RWMutex
 }
 
-func (r *routedb) SetRoute(owner types.NamespacedName, hostnames []string, targetAddr, mode string, proxyProto bool) error {
+func (r *routedb) SetRoute(owner types.NamespacedName, hostnames []string, targetAddr, mode string, proxyProto bool, oidcCfg *oidcConfig) error {
 	r.routesMu.Lock()
 	defer r.routesMu.Unlock()
 
@@ -67,6 +72,18 @@ func (r *routedb) SetRoute(owner types.NamespacedName, hostnames []string, targe
 				return fmt.Errorf("parsing upstream url for host %s: %w", h, err)
 			}
 			rt.HTTPProxy = httputil.NewSingleHostReverseProxy(upstreamURL)
+			rt.HTTPHandler = http.Handler(rt.HTTPProxy)
+			if oidcCfg != nil {
+				if r.ctx == nil {
+					r.ctx = context.Background()
+				}
+				mw, err := buildMiddlewareForHost(r.ctx, h, *oidcCfg)
+				if err != nil {
+					return fmt.Errorf("building oidc middleware for host %s: %w", h, err)
+				}
+				rt.HTTPHandler = mw(rt.HTTPHandler)
+			}
+			rt.OIDC = oidcCfg
 		}
 		r.routes[h] = route{
 			Owner:      rt.Owner,
@@ -74,6 +91,8 @@ func (r *routedb) SetRoute(owner types.NamespacedName, hostnames []string, targe
 			Mode:       rt.Mode,
 			Proxy:      rt.Proxy,
 			HTTPProxy:  rt.HTTPProxy,
+			HTTPHandler: rt.HTTPHandler,
+			OIDC:       rt.OIDC,
 		}
 	}
 

@@ -20,9 +20,16 @@ const (
 	annSNIHostnames            = "ingress.lds.li/sni-hostnames"
 	annHTTPHostnames           = "ingress.lds.li/hostnames"
 	annProxyProtocol           = "ingress.lds.li/proxy-protocol"
+	annAuthMode                = "ingress.lds.li/auth-mode"
+	annOIDCIssuer              = "ingress.lds.li/oidc-issuer"
+	annOIDCDynamicClient       = "ingress.lds.li/oidc-dynamic-client"
+	annOIDCUsernameHeader      = "ingress.lds.li/oidc-preferred-username-header"
+	annOIDCEmailHeader         = "ingress.lds.li/oidc-email-header"
+	annRequireGroup            = "ingress.lds.li/require-group"
 	modeTLSPassthrough         = "tls-passthrough"
 	modeTLSTermination         = "tls-termination"
 	modeHTTPS                  = "https"
+	authModeOIDC               = "OIDC"
 	proxyProtocolVersion1Value = "v1"
 )
 
@@ -74,7 +81,29 @@ func (s *ServiceReconciler) Reconcile(ctx context.Context, req reconcile.Request
 
 	targetAddr := net.JoinHostPort(svc.Spec.ClusterIP, strconv.Itoa(int(svc.Spec.Ports[0].Port)))
 	proxyProto := svc.Annotations[annProxyProtocol] == proxyProtocolVersion1Value
-	if err := s.rdb.SetRoute(req.NamespacedName, hostnames, targetAddr, mode, proxyProto); err != nil {
+
+	var oidcCfg *oidcConfig
+	if mode == modeHTTPS && strings.EqualFold(svc.Annotations[annAuthMode], authModeOIDC) {
+		if !strings.EqualFold(svc.Annotations[annOIDCDynamicClient], "true") {
+			s.logger.Info("ignoring service: oidc auth requires dynamic client registration", "service", req.NamespacedName)
+			s.rdb.RemoveRoute(req.NamespacedName)
+			return reconcile.Result{}, nil
+		}
+		issuer := strings.TrimSpace(svc.Annotations[annOIDCIssuer])
+		if issuer == "" {
+			s.logger.Info("ignoring service: missing oidc issuer for auth mode OIDC", "service", req.NamespacedName)
+			s.rdb.RemoveRoute(req.NamespacedName)
+			return reconcile.Result{}, nil
+		}
+		oidcCfg = &oidcConfig{
+			Issuer:         issuer,
+			UsernameHeader: strings.TrimSpace(svc.Annotations[annOIDCUsernameHeader]),
+			EmailHeader:    strings.TrimSpace(svc.Annotations[annOIDCEmailHeader]),
+			RequireGroup:   strings.TrimSpace(svc.Annotations[annRequireGroup]),
+		}
+	}
+
+	if err := s.rdb.SetRoute(req.NamespacedName, hostnames, targetAddr, mode, proxyProto, oidcCfg); err != nil {
 		return reconcile.Result{}, err
 	}
 	return reconcile.Result{}, nil

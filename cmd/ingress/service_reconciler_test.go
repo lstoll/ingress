@@ -2,44 +2,16 @@ package main
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"testing"
-	"time"
-
-	"github.com/google/go-cmp/cmp"
-	"github.com/google/go-cmp/cmp/cmpopts"
-	"inet.af/tcpproxy"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/envtest"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 func TestServiceReconcile(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	testbinPath := filepath.Join("..", "..", "testbin")
-	binaryAssetsPath := filepath.Join(testbinPath, "bin")
-	if _, err := os.Stat(binaryAssetsPath); os.IsNotExist(err) {
-		t.Skipf("%s not found, skipping", binaryAssetsPath)
-	}
-	testEnv := &envtest.Environment{
-		BinaryAssetsDirectory: binaryAssetsPath,
-	}
-
-	cfg, err := testEnv.Start()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer testEnv.Stop()
-
-	c, err := client.New(cfg, client.Options{Scheme: scheme})
-	if err != nil {
-		t.Fatal(err)
-	}
+	ctx := context.Background()
 
 	rdb := &routedb{
 		logger: testLogger(),
@@ -53,17 +25,6 @@ func TestServiceReconcile(t *testing.T) {
 	}
 
 	svcNamespace := "default"
-	mgr, err := newMgr(cfg, svcNamespace, r)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	mgrErr := make(chan error, 1)
-	go func() {
-		err := mgr.Start(ctx)
-		cancel()
-		mgrErr <- err
-	}()
 
 	passSvc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -85,9 +46,6 @@ func TestServiceReconcile(t *testing.T) {
 			ClusterIP: "10.0.0.99",
 		},
 	}
-	if err := c.Create(ctx, passSvc); err != nil {
-		t.Fatal(err)
-	}
 
 	termSvc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -108,57 +66,136 @@ func TestServiceReconcile(t *testing.T) {
 			ClusterIP: "10.0.0.98",
 		},
 	}
-	if err := c.Create(ctx, termSvc); err != nil {
-		t.Fatal(err)
+
+	r.Client = fake.NewClientBuilder().WithScheme(scheme).WithObjects(passSvc, termSvc).Build()
+	if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: svcNamespace, Name: passSvc.Name}}); err != nil {
+		t.Fatalf("reconcile pass service: %v", err)
+	}
+	if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: svcNamespace, Name: termSvc.Name}}); err != nil {
+		t.Fatalf("reconcile term service: %v", err)
 	}
 
-	want := map[string]route{
-		"foo.example.com": {
-			Owner: types.NamespacedName{
-				Namespace: svcNamespace,
-				Name:      "backend-pass",
+	gotPass, ok := rdb.RouteFor("foo.example.com")
+	if !ok {
+		t.Fatalf("expected foo.example.com route")
+	}
+	if gotPass.Owner != (types.NamespacedName{Namespace: svcNamespace, Name: "backend-pass"}) {
+		t.Fatalf("unexpected pass owner: %#v", gotPass.Owner)
+	}
+	if gotPass.TargetAddr != "10.0.0.99:443" {
+		t.Fatalf("unexpected pass target addr: %s", gotPass.TargetAddr)
+	}
+	if gotPass.Mode != modeTLSPassthrough {
+		t.Fatalf("unexpected pass mode: %s", gotPass.Mode)
+	}
+	if gotPass.Proxy == nil || gotPass.Proxy.ProxyProtocolVersion != 1 {
+		t.Fatalf("expected pass proxy with proxy protocol v1")
+	}
+
+	gotTerm, ok := rdb.RouteFor("bar.example.com")
+	if !ok {
+		t.Fatalf("expected bar.example.com route")
+	}
+	if gotTerm.Owner != (types.NamespacedName{Namespace: svcNamespace, Name: "backend-term"}) {
+		t.Fatalf("unexpected term owner: %#v", gotTerm.Owner)
+	}
+	if gotTerm.TargetAddr != "10.0.0.98:8080" {
+		t.Fatalf("unexpected term target addr: %s", gotTerm.TargetAddr)
+	}
+	if gotTerm.Mode != modeHTTPS {
+		t.Fatalf("unexpected term mode: %s", gotTerm.Mode)
+	}
+	if gotTerm.Proxy != nil {
+		t.Fatalf("expected nil proxy for https mode")
+	}
+	if gotTerm.HTTPProxy == nil {
+		t.Fatalf("expected HTTP proxy for https mode")
+	}
+}
+
+func TestServiceReconcileRemovesRouteForWrongInstance(t *testing.T) {
+	ctx := context.Background()
+	rdb := &routedb{
+		logger: testLogger(),
+		routes: map[string]route{},
+	}
+	r := &ServiceReconciler{
+		logger:   testLogger(),
+		rdb:      rdb,
+		instance: "ingress1",
+	}
+
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "backend",
+			Namespace: "default",
+			Labels: map[string]string{
+				labelIngressInstance: "other-instance",
 			},
-			TargetAddr: "10.0.0.99:443",
-			Mode:       modeTLSPassthrough,
-			Proxy: &tcpproxy.DialProxy{
-				Addr:                 "10.0.0.99:443",
-				ProxyProtocolVersion: 1,
+			Annotations: map[string]string{
+				annMode:         modeTLSPassthrough,
+				annSNIHostnames: "ignored.example.com",
 			},
 		},
-		"bar.example.com": {
-			Owner: types.NamespacedName{
-				Namespace: svcNamespace,
-				Name:      "backend-term",
+		Spec: corev1.ServiceSpec{
+			ClusterIP: "10.0.0.99",
+			Ports: []corev1.ServicePort{
+				{Port: 443},
 			},
-			TargetAddr: "10.0.0.98:8080",
-			Mode:       modeHTTPS,
-			Proxy:      nil,
 		},
 	}
+	r.Client = fake.NewClientBuilder().WithScheme(scheme).WithObjects(svc).Build()
 
-	start := time.Now()
-	var diff string
-	for {
-		rdb.routesMu.RLock()
-		diff = cmp.Diff(want, rdb.routes,
-			cmpopts.IgnoreUnexported(tcpproxy.DialProxy{}),
-			cmpopts.IgnoreFields(route{}, "HTTPProxy"),
-		)
-		rdb.routesMu.RUnlock()
-		if diff == "" || time.Since(start) > 5*time.Second {
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
+	if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "backend"}}); err != nil {
+		t.Fatalf("reconcile: %v", err)
 	}
-	if diff != "" {
-		t.Errorf("route db mismatch (-want +got):\n%s", diff)
+	if _, ok := rdb.RouteFor("ignored.example.com"); ok {
+		t.Fatalf("did not expect route for non-matching instance")
+	}
+}
+
+func TestServiceReconcileOIDCConfigValidation(t *testing.T) {
+	ctx := context.Background()
+	rdb := &routedb{
+		logger: testLogger(),
+		ctx:    ctx,
+		routes: map[string]route{},
+	}
+	r := &ServiceReconciler{
+		logger:   testLogger(),
+		rdb:      rdb,
+		instance: "ingress1",
 	}
 
-	select {
-	case err := <-mgrErr:
-		if err != nil {
-			t.Fatalf("manager exited with error: %v", err)
-		}
-	default:
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "backend-https-auth",
+			Namespace: "default",
+			Labels: map[string]string{
+				labelIngressInstance: "ingress1",
+			},
+			Annotations: map[string]string{
+				annMode:               modeHTTPS,
+				annHTTPHostnames:      "auth.example.com",
+				annAuthMode:           authModeOIDC,
+				annOIDCDynamicClient:  "false",
+				annOIDCIssuer:         "https://issuer.example.com",
+				annOIDCUsernameHeader: "Remote-User",
+			},
+		},
+		Spec: corev1.ServiceSpec{
+			ClusterIP: "10.0.0.98",
+			Ports: []corev1.ServicePort{
+				{Port: 8080},
+			},
+		},
+	}
+	r.Client = fake.NewClientBuilder().WithScheme(scheme).WithObjects(svc).Build()
+
+	if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: svc.Name}}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if _, ok := rdb.RouteFor("auth.example.com"); ok {
+		t.Fatalf("expected no route when oidc dynamic client is not true")
 	}
 }

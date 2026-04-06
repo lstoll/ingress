@@ -60,6 +60,7 @@ func main() {
 
 	rdb := &routedb{
 		logger: log,
+		ctx:    ctx,
 		routes: map[string]route{},
 	}
 	cp, err := newCertProvider(*certMode, certProviderConfig{

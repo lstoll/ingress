@@ -87,12 +87,12 @@ func (d *director) handleTerminateRoute(c *tcpproxy.Conn, rt route) error {
 	defer tlsConn.Close()
 
 	if rt.Mode == modeHTTPS {
-		if rt.HTTPProxy == nil {
-			return fmt.Errorf("missing http reverse proxy for route")
+		if rt.HTTPHandler == nil {
+			return fmt.Errorf("missing http handler for route")
 		}
 
 		oneConnLn := newSingleConnListener(tlsConn)
-		hs := &http.Server{Handler: rt.HTTPProxy}
+		hs := &http.Server{Handler: rt.HTTPHandler}
 		errCh := make(chan error, 1)
 		go func() {
 			errCh <- hs.Serve(oneConnLn)

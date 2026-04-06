@@ -104,6 +104,8 @@ metadata:
     ingress.lds.li/oidc-issuer: "https://id.lds.li"
     ingress.lds.li/oidc-dynamic-client: true
     ingress.lds.li/oidc-preferred-username-header: "Remote-User"
+    ingress.lds.li/oidc-email-header: "Remote-User-Email"
+    ingress.lds.li/require-group: "admin"
 spec:
   selector:
     app.kubernetes.io/name: secure-webapp
