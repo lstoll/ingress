@@ -32,7 +32,7 @@ const (
 func main() {
 	ctx := context.Background()
 
-	fs := flag.NewFlagSet("sni-lb", flag.ExitOnError)
+	fs := flag.NewFlagSet("ingress", flag.ExitOnError)
 
 	zapOpts := &zap.Options{}
 	zapOpts.BindFlags(fs)
@@ -45,7 +45,7 @@ func main() {
 
 	logf.SetLogger(zap.New(zap.UseFlagOptions(zapOpts)))
 
-	var log = logf.Log.WithName("sni-lb")
+	var log = logf.Log.WithName("ingress")
 
 	cfg := config.GetConfigOrDie()
 

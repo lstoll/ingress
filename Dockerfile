@@ -15,4 +15,4 @@ RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=0 go install ./.
 
 FROM debian:trixie-slim
 COPY --from=build-env /go/bin/http-sidecar /
-COPY --from=build-env /go/bin/sni-lb /
+COPY --from=build-env /go/bin/ingress /

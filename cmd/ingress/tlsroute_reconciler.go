@@ -88,7 +88,7 @@ func (s *TLSRouteReconciler) Reconcile(ctx context.Context, req reconcile.Reques
 
 	targetAddr := net.JoinHostPort(svc.Spec.ClusterIP, strconv.Itoa(int(*backendRef.Port)))
 
-	// maintain proxy protocol compatibility, default true for sni-lb
+	// maintain proxy protocol compatibility, default true for ingress
 	proxyProto := true
 	if _, disable := tlsRoute.Annotations["service.beta.lds.li/disable-proxy-proto"]; disable {
 		proxyProto = false
