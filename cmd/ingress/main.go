@@ -155,24 +155,8 @@ func main() {
 
 	if *httpListen != "" {
 		hs := &http.Server{
-			Addr: *httpListen,
-			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				host := r.Host
-				if h, _, err := net.SplitHostPort(r.Host); err == nil {
-					host = h
-				}
-				if !rdb.HasHost(host) {
-					log.Debug("http redirect miss", "host", host, "path", r.URL.Path)
-					http.NotFound(w, r)
-					return
-				}
-				redirectHost := host
-				if *httpsRedirectPort != "" {
-					redirectHost = net.JoinHostPort(host, *httpsRedirectPort)
-				}
-				log.Debug("redirecting http to https", "host", host, "target_host", redirectHost, "path", r.URL.Path)
-				http.Redirect(w, r, "https://"+redirectHost+r.URL.RequestURI(), http.StatusPermanentRedirect)
-			}),
+			Addr:    *httpListen,
+			Handler: httpsRedirectHandler(rdb, *httpsRedirectPort, log),
 		}
 		g.Add(func() error {
 			log.Info("starting HTTP redirect listener", "addr", *httpListen)
@@ -189,6 +173,26 @@ func main() {
 	if err := g.Run(); err != nil {
 		log.Error("running", "error", err)
 	}
+}
+
+func httpsRedirectHandler(rdb *routedb, httpsRedirectPort string, log *slog.Logger) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := r.Host
+		if h, _, err := net.SplitHostPort(r.Host); err == nil {
+			host = h
+		}
+		if !rdb.HasHost(host) {
+			log.Debug("http redirect miss", "host", host, "path", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		redirectHost := host
+		if httpsRedirectPort != "" {
+			redirectHost = net.JoinHostPort(host, httpsRedirectPort)
+		}
+		log.Debug("redirecting http to https", "host", host, "target_host", redirectHost, "path", r.URL.Path)
+		http.Redirect(w, r, "https://"+redirectHost+r.URL.RequestURI(), http.StatusPermanentRedirect)
+	})
 }
 
 func listenWithOptionalProxyProto(network, addr string, enabled bool, timeout time.Duration) (net.Listener, error) {

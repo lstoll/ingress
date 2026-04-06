@@ -27,6 +27,10 @@ type routedb struct {
 	logger *slog.Logger
 	ctx    context.Context
 
+	// authMiddlewareBuilder wires OIDC (or test doubles) in front of HTTPS reverse
+	// proxies. When nil, buildMiddlewareForHost is used.
+	authMiddlewareBuilder func(ctx context.Context, host string, cfg oidcConfig) (func(http.Handler) http.Handler, error)
+
 	// map of hostnames to route
 	routes   map[string]route
 	routesMu sync.RWMutex
@@ -80,7 +84,11 @@ func (r *routedb) SetRoute(owner types.NamespacedName, hostnames []string, targe
 				if r.ctx == nil {
 					r.ctx = context.Background()
 				}
-				mw, err := buildMiddlewareForHost(r.ctx, h, *oidcCfg)
+				builder := r.authMiddlewareBuilder
+				if builder == nil {
+					builder = buildMiddlewareForHost
+				}
+				mw, err := builder(r.ctx, h, *oidcCfg)
 				if err != nil {
 					return fmt.Errorf("building oidc middleware for host %s: %w", h, err)
 				}
