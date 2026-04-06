@@ -40,9 +40,17 @@ func buildMiddlewareForHost(ctx context.Context, incomingHostname string, cfg oi
 	withInboundHeaderStrip := func(h http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if cfg.UsernameHeader != "" {
+				if v := r.Header.Get(cfg.UsernameHeader); v != "" {
+					slog.Debug("oidc: stripping inbound username header before auth",
+						"hostname", incomingHostname, "header", cfg.UsernameHeader, "inbound_value", v)
+				}
 				r.Header.Del(cfg.UsernameHeader)
 			}
 			if cfg.EmailHeader != "" {
+				if v := r.Header.Get(cfg.EmailHeader); v != "" {
+					slog.Debug("oidc: stripping inbound email header before auth",
+						"hostname", incomingHostname, "header", cfg.EmailHeader, "inbound_value", v)
+				}
 				r.Header.Del(cfg.EmailHeader)
 			}
 			h.ServeHTTP(w, r)
@@ -70,6 +78,8 @@ func buildMiddlewareForHost(ctx context.Context, incomingHostname string, cfg oi
 			return omw.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				cl, ok := omw.IDClaimsFromContext(r.Context())
 				if !ok {
+					slog.Debug("oidc: no verified ID claims in context; cannot set auth headers",
+						"hostname", incomingHostname, "method", r.Method, "path", r.URL.Path)
 					http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 					return
 				}
@@ -80,14 +90,42 @@ func buildMiddlewareForHost(ctx context.Context, incomingHostname string, cfg oi
 					return
 				}
 
+				cljson, err := cl.JSONPayload()
+				if err != nil {
+					slog.Error("oidc: failed to get JSON payload from claims", "hostname", incomingHostname, "error", err)
+					http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+					return
+				}
+				slog.Debug("oidc: claims JSON payload", "hostname", incomingHostname, "payload", string(cljson))
+
 				if cfg.UsernameHeader != "" {
-					if username, err := cl.StringClaim("preferred_username"); err == nil && username != "" {
+					username, err := cl.PreferredUsername()
+					switch {
+					case err != nil:
+						slog.Debug("oidc: preferred_username claim not usable; username header not set",
+							"hostname", incomingHostname, "header", cfg.UsernameHeader, "error", err)
+					case username == "":
+						slog.Debug("oidc: preferred_username claim empty; username header not set",
+							"hostname", incomingHostname, "header", cfg.UsernameHeader, "preferred_username", "")
+					default:
 						r.Header.Set(cfg.UsernameHeader, username)
+						slog.Debug("oidc: set username header from preferred_username claim",
+							"hostname", incomingHostname, "header", cfg.UsernameHeader, "preferred_username", username)
 					}
 				}
 				if cfg.EmailHeader != "" {
-					if email, err := cl.StringClaim("email"); err == nil && email != "" {
+					email, err := cl.Email()
+					switch {
+					case err != nil:
+						slog.Debug("oidc: email claim not usable; email header not set",
+							"hostname", incomingHostname, "header", cfg.EmailHeader, "error", err)
+					case email == "":
+						slog.Debug("oidc: email claim empty; email header not set",
+							"hostname", incomingHostname, "header", cfg.EmailHeader, "email", "")
+					default:
 						r.Header.Set(cfg.EmailHeader, email)
+						slog.Debug("oidc: set email header from email claim",
+							"hostname", incomingHostname, "header", cfg.EmailHeader, "email", email)
 					}
 				}
 
@@ -198,4 +236,3 @@ func claimsHasGroup(cl *claims.VerifiedID, required string) bool {
 	}
 	return false
 }
-
