@@ -4,6 +4,8 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 
 	"github.com/oklog/run"
@@ -35,11 +37,13 @@ func main() {
 	zapOpts.BindFlags(fs)
 
 	var (
-		addr           = fs.String("listen", "0.0.0.0:8443", "Address to listen on")
-		instance       = fs.String("instance", "", "Ingress instance name to select services (ingress.lds.li/instance label)")
-		watchNamespace = fs.String("watch-namespace", "", "Optional namespace to watch services in. Empty means all namespaces")
-		certMode       = fs.String("cert-mode", certModeSelfSigned, "Certificate mode for terminated TLS routes: self-signed or autocert")
-		autocertSecret = fs.String("autocert-secret", "", "namespace/name secret for autocert cache (required when --cert-mode=autocert)")
+		tlsListen         = fs.String("tls-listen", "0.0.0.0:443", "TLS listener address")
+		httpListen        = fs.String("http-listen", "", "Optional plain HTTP listener for HTTPS redirects")
+		httpsRedirectPort = fs.String("https-redirect-port", "", "Optional explicit HTTPS port for redirects")
+		instance          = fs.String("instance", "", "Ingress instance name to select services (ingress.lds.li/instance label)")
+		watchNamespace    = fs.String("watch-namespace", "", "Optional namespace to watch services in. Empty means all namespaces")
+		certMode          = fs.String("cert-mode", certModeSelfSigned, "Certificate mode for terminated TLS routes: self-signed or autocert")
+		autocertSecret    = fs.String("autocert-secret", "", "namespace/name secret for autocert cache (required when --cert-mode=autocert)")
 	)
 
 	fs.Parse(os.Args[1:])
@@ -103,7 +107,7 @@ func main() {
 	p := &tcpproxy.Proxy{}
 	proxyContext, proxyCancel := context.WithCancel(ctx)
 	g.Add(func() error {
-		p.AddSNIMatchRoute(*addr, MatchAny, d)
+		p.AddSNIMatchRoute(*tlsListen, MatchAny, d)
 		if err := p.Start(); err != nil {
 			return err
 		}
@@ -113,6 +117,32 @@ func main() {
 		proxyCancel()
 		_ = p.Close()
 	})
+
+	if *httpListen != "" {
+		hs := &http.Server{
+			Addr: *httpListen,
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				host := r.Host
+				if h, _, err := net.SplitHostPort(r.Host); err == nil {
+					host = h
+				}
+				if !rdb.HasHost(host) {
+					http.NotFound(w, r)
+					return
+				}
+				redirectHost := host
+				if *httpsRedirectPort != "" {
+					redirectHost = net.JoinHostPort(host, *httpsRedirectPort)
+				}
+				http.Redirect(w, r, "https://"+redirectHost+r.URL.RequestURI(), http.StatusPermanentRedirect)
+			}),
+		}
+		g.Add(func() error {
+			return hs.ListenAndServe()
+		}, func(error) {
+			_ = hs.Close()
+		})
+	}
 
 	if err := g.Run(); err != nil {
 		log.Error(err, "running")

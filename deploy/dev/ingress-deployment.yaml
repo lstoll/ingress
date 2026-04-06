@@ -22,6 +22,10 @@ spec:
           args:
             - --instance=ingress1
             - --cert-mode=self-signed
+            - --http-listen=0.0.0.0:80
+            - --https-redirect-port=8443
           ports:
-            - containerPort: 8443
+            - containerPort: 443
               name: tls
+            - containerPort: 80
+              name: http

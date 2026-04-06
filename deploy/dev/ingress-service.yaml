@@ -9,5 +9,9 @@ spec:
   ports:
     - name: tls
       port: 443
-      targetPort: 8443
+      targetPort: 443
       nodePort: 30443
+    - name: http
+      port: 80
+      targetPort: 80
+      nodePort: 30080

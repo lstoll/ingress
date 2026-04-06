@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"net/http/httputil"
+	"net/url"
 	"sync"
 
 	"github.com/go-logr/logr"
@@ -12,8 +14,9 @@ import (
 type route struct {
 	Owner        types.NamespacedName
 	TargetAddr   string
-	TerminateTLS bool
+	Mode         string
 	Proxy        *tcpproxy.DialProxy
+	HTTPProxy    *httputil.ReverseProxy
 }
 
 type routedb struct {
@@ -24,7 +27,7 @@ type routedb struct {
 	routesMu sync.RWMutex
 }
 
-func (r *routedb) SetRoute(owner types.NamespacedName, hostnames []string, targetAddr string, proxyProto bool, terminateTLS bool) error {
+func (r *routedb) SetRoute(owner types.NamespacedName, hostnames []string, targetAddr, mode string, proxyProto bool) error {
 	r.routesMu.Lock()
 	defer r.routesMu.Unlock()
 
@@ -49,21 +52,28 @@ func (r *routedb) SetRoute(owner types.NamespacedName, hostnames []string, targe
 
 	for _, h := range hostnames {
 		rt := route{
-			Owner:        owner,
-			TargetAddr:   targetAddr,
-			TerminateTLS: terminateTLS,
+			Owner:      owner,
+			TargetAddr: targetAddr,
+			Mode:       mode,
 		}
-		if !terminateTLS {
+		if mode == modeTLSPassthrough {
 			rt.Proxy = &tcpproxy.DialProxy{
 				Addr:                 targetAddr,
 				ProxyProtocolVersion: ppVersion,
 			}
+		} else if mode == modeHTTPS {
+			upstreamURL, err := url.Parse("http://" + targetAddr)
+			if err != nil {
+				return fmt.Errorf("parsing upstream url for host %s: %w", h, err)
+			}
+			rt.HTTPProxy = httputil.NewSingleHostReverseProxy(upstreamURL)
 		}
 		r.routes[h] = route{
-			Owner:        rt.Owner,
-			TargetAddr:   rt.TargetAddr,
-			TerminateTLS: rt.TerminateTLS,
-			Proxy:        rt.Proxy,
+			Owner:      rt.Owner,
+			TargetAddr: rt.TargetAddr,
+			Mode:       rt.Mode,
+			Proxy:      rt.Proxy,
+			HTTPProxy:  rt.HTTPProxy,
 		}
 	}
 

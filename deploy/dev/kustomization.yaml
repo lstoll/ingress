@@ -12,6 +12,7 @@ resources:
   - backend-http-configmap.yaml
   - backend-http-deployment.yaml
   - backend-http-service.yaml
+  - backend-https-service.yaml
   - ingress-deployment.yaml
   - ingress-service.yaml
 

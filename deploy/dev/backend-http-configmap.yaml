@@ -6,7 +6,7 @@ data:
   default.conf: |
     server {
       listen 8080;
-      server_name term.localtest.me;
+      server_name term.localtest.me https.localtest.me;
 
       location / {
         add_header Content-Type text/plain;

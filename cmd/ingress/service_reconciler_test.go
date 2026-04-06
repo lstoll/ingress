@@ -97,8 +97,8 @@ func TestServiceReconcile(t *testing.T) {
 				labelIngressInstance: "ingress1",
 			},
 			Annotations: map[string]string{
-				annMode:         modeTLSTermination,
-				annSNIHostnames: "bar.example.com",
+				annMode:         modeHTTPS,
+				annHTTPHostnames: "bar.example.com",
 			},
 		},
 		Spec: corev1.ServiceSpec{
@@ -118,8 +118,8 @@ func TestServiceReconcile(t *testing.T) {
 				Namespace: svcNamespace,
 				Name:      "backend-pass",
 			},
-			TargetAddr:   "10.0.0.99:443",
-			TerminateTLS: false,
+			TargetAddr: "10.0.0.99:443",
+			Mode:       modeTLSPassthrough,
 			Proxy: &tcpproxy.DialProxy{
 				Addr:                 "10.0.0.99:443",
 				ProxyProtocolVersion: 1,
@@ -130,9 +130,9 @@ func TestServiceReconcile(t *testing.T) {
 				Namespace: svcNamespace,
 				Name:      "backend-term",
 			},
-			TargetAddr:   "10.0.0.98:8080",
-			TerminateTLS: true,
-			Proxy:        nil,
+			TargetAddr: "10.0.0.98:8080",
+			Mode:       modeHTTPS,
+			Proxy:      nil,
 		},
 	}
 
@@ -140,7 +140,10 @@ func TestServiceReconcile(t *testing.T) {
 	var diff string
 	for {
 		rdb.routesMu.RLock()
-		diff = cmp.Diff(want, rdb.routes, cmpopts.IgnoreUnexported(tcpproxy.DialProxy{}))
+		diff = cmp.Diff(want, rdb.routes,
+			cmpopts.IgnoreUnexported(tcpproxy.DialProxy{}),
+			cmpopts.IgnoreFields(route{}, "HTTPProxy"),
+		)
 		rdb.routesMu.RUnlock()
 		if diff == "" || time.Since(start) > 5*time.Second {
 			break

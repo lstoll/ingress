@@ -200,8 +200,8 @@ func TestDirectorTLSTerminate(t *testing.T) {
 		ps: &mockProxySource{
 			routes: map[string]route{
 				"app.localtest.me": {
-					TargetAddr:   addr,
-					TerminateTLS: true,
+					TargetAddr: addr,
+					Mode:       modeTLSTermination,
 				},
 			},
 		},

@@ -1,4 +1,4 @@
-# Local Gateway API dev loop
+# Local service-annotation dev loop
 
 This repo now has a local kind + skaffold setup for the `ingress` gateway process.
 
@@ -25,7 +25,9 @@ The checked-in `.envrc` points `KUBECONFIG` at `.kube/config` in this repo.
 
 This script:
 
-- creates a kind cluster named `ingress-dev` with host port `8443` mapped to NodePort `30443`
+- creates a kind cluster named `ingress-dev` with:
+  - host port `8443` mapped to NodePort `30443` (TLS)
+  - host port `8080` mapped to NodePort `30080` (HTTP redirect)
 - writes kubeconfig to `.kube/config`
 - installs baseline cluster prerequisites for this repo
 
@@ -37,12 +39,13 @@ The local deployment currently runs `ingress` with `--cert-mode=self-signed` as 
 skaffold run
 ```
 
-Skaffold builds the local `ingress` image and applies `deploy/dev` manifests (one ingress deployment and two annotated backend services).
+Skaffold builds the local `ingress` image and applies `deploy/dev` manifests (one ingress deployment and three annotated backend services).
 
 Ingress runs on a single listener and routes by SNI hostname from service annotations:
 
 - `pass.localtest.me` -> TLS passthrough backend
-- `term.localtest.me` -> TLS terminated at ingress, then plain HTTP to backend
+- `term.localtest.me` -> TLS terminated at ingress, raw stream to backend (connection-level)
+- `https.localtest.me` -> HTTPS mode (terminated TLS + HTTP reverse proxy)
 
 ## Production-style autocert mode
 
@@ -82,7 +85,7 @@ Expected response body:
 hello from demo backend (tls)
 ```
 
-Terminate curl:
+TLS termination (connection-level) curl:
 
 ```bash
 curl -vk --resolve term.localtest.me:8443:127.0.0.1 https://term.localtest.me:8443/
@@ -93,6 +96,26 @@ Expected response body:
 ```text
 hello from demo backend (http)
 ```
+
+HTTPS reverse-proxy mode curl:
+
+```bash
+curl -vk --resolve https.localtest.me:8443:127.0.0.1 https://https.localtest.me:8443/
+```
+
+Expected response body:
+
+```text
+hello from demo backend (http)
+```
+
+HTTP redirect curl:
+
+```bash
+curl -v --resolve https.localtest.me:8080:127.0.0.1 http://https.localtest.me:8080/
+```
+
+Expected behavior: `308` redirect to `https://https.localtest.me:8443/...`.
 
 ## Tear down
 

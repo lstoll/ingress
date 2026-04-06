@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"sync"
 
 	"github.com/go-logr/logr"
@@ -48,7 +50,7 @@ func (d *director) HandleConn(c net.Conn) {
 		d.writeConnErr(c)
 		return
 	}
-	if rt.TerminateTLS {
+	if rt.Mode == modeTLSTermination || rt.Mode == modeHTTPS {
 		if err := d.handleTerminateRoute(uc, rt); err != nil {
 			d.logger.Error(err, "handling terminated tls route", "host", uc.HostName)
 			d.writeConnErr(c)
@@ -84,6 +86,27 @@ func (d *director) handleTerminateRoute(c *tcpproxy.Conn, rt route) error {
 	}
 	defer tlsConn.Close()
 
+	if rt.Mode == modeHTTPS {
+		if rt.HTTPProxy == nil {
+			return fmt.Errorf("missing http reverse proxy for route")
+		}
+
+		oneConnLn := newSingleConnListener(tlsConn)
+		hs := &http.Server{Handler: rt.HTTPProxy}
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- hs.Serve(oneConnLn)
+		}()
+
+		<-oneConnLn.done
+		_ = hs.Close()
+		err := <-errCh
+		if err != nil && err != io.EOF && err != net.ErrClosed && err.Error() != "http: Server closed" {
+			return err
+		}
+		return nil
+	}
+
 	upstreamConn, err := net.Dial("tcp", rt.TargetAddr)
 	if err != nil {
 		return err
@@ -105,6 +128,64 @@ func (d *director) handleTerminateRoute(c *tcpproxy.Conn, rt route) error {
 	}()
 	wg.Wait()
 	return nil
+}
+
+type singleConnListener struct {
+	conn net.Conn
+	used bool
+	done chan struct{}
+	once sync.Once
+}
+
+func newSingleConnListener(conn net.Conn) *singleConnListener {
+	return &singleConnListener{
+		conn: conn,
+		done: make(chan struct{}),
+	}
+}
+
+func (s *singleConnListener) Accept() (net.Conn, error) {
+	if s.used || s.conn == nil {
+		<-s.done
+		return nil, net.ErrClosed
+	}
+	s.used = true
+	return &notifyingConn{
+		Conn: s.conn,
+		onClose: func() {
+			s.once.Do(func() {
+				close(s.done)
+			})
+		},
+	}, nil
+}
+
+func (s *singleConnListener) Close() error {
+	s.once.Do(func() {
+		close(s.done)
+	})
+	if s.conn != nil {
+		return s.conn.Close()
+	}
+	return nil
+}
+
+func (s *singleConnListener) Addr() net.Addr {
+	if s.conn != nil {
+		return s.conn.LocalAddr()
+	}
+	return &net.TCPAddr{}
+}
+
+type notifyingConn struct {
+	net.Conn
+	once    sync.Once
+	onClose func()
+}
+
+func (n *notifyingConn) Close() error {
+	n.once.Do(n.onClose)
+	return n.Conn.Close()
 }
 
 // writeConnErr is used for handling conns we can't handle
