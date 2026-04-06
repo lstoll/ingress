@@ -25,11 +25,9 @@ The checked-in `.envrc` points `KUBECONFIG` at `.kube/config` in this repo.
 
 This script:
 
-- creates a kind cluster named `ingress-dev` with:
-  - host port `8443` mapped to NodePort `30443` (passthrough)
-  - host port `9443` mapped to NodePort `31443` (terminate)
+- creates a kind cluster named `ingress-dev` with host port `8443` mapped to NodePort `30443`
 - writes kubeconfig to `.kube/config`
-- installs Gateway API standard CRDs (server-side apply)
+- installs baseline cluster prerequisites for this repo
 
 The local deployment currently runs `ingress` with `--cert-mode=self-signed` as groundwork for terminated TLS routes.
 
@@ -39,12 +37,12 @@ The local deployment currently runs `ingress` with `--cert-mode=self-signed` as 
 skaffold run
 ```
 
-Skaffold builds the local `ingress` image and applies `deploy/dev` manifests (Gateway, two TLSRoutes, one ingress deployment, and demo backends).
+Skaffold builds the local `ingress` image and applies `deploy/dev` manifests (one ingress deployment and two annotated backend services).
 
-Ingress runs in two modes simultaneously (different listeners and hostnames):
+Ingress runs on a single listener and routes by SNI hostname from service annotations:
 
-- `pass-tls` listener on port `443` for passthrough mode
-- `term-tls` listener on port `4443` for ingress-side TLS termination
+- `pass.localtest.me` -> TLS passthrough backend
+- `term.localtest.me` -> TLS terminated at ingress, then plain HTTP to backend
 
 ## Production-style autocert mode
 
@@ -52,8 +50,7 @@ For real certificate issuance, run ingress with `--cert-mode=autocert` and provi
 
 ```bash
 /ingress \
-  --gateway-name=ingress \
-  --gateway-namespace=ingress-dev \
+  --instance=ingress1 \
   --cert-mode=autocert \
   --autocert-secret=ingress-dev/autocert-cache
 ```
@@ -66,7 +63,7 @@ Notes:
 ## Verify
 
 ```bash
-kubectl -n ingress-dev get gateway,service,tlsroute,pods
+kubectl -n ingress-dev get service,pods
 ```
 
 ```bash
@@ -88,7 +85,7 @@ hello from demo backend (tls)
 Terminate curl:
 
 ```bash
-curl -vk --resolve term.localtest.me:9443:127.0.0.1 https://term.localtest.me:9443/
+curl -vk --resolve term.localtest.me:8443:127.0.0.1 https://term.localtest.me:8443/
 ```
 
 Expected response body:

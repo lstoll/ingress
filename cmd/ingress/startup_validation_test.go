@@ -5,37 +5,37 @@ import "testing"
 func TestValidateStartupConfig(t *testing.T) {
 	tests := []struct {
 		name           string
-		gatewayName    string
+		instance       string
 		certMode       string
 		autocertSecret string
 		wantErr        bool
 	}{
 		{
 			name:        "valid self-signed mode",
-			gatewayName: "ingress",
+			instance:    "ingress1",
 			certMode:    certModeSelfSigned,
 		},
 		{
-			name:        "missing gateway name",
+			name:        "missing instance",
 			certMode:    certModeSelfSigned,
 			wantErr:     true,
 		},
 		{
 			name:        "autocert missing secret",
-			gatewayName: "ingress",
+			instance:    "ingress1",
 			certMode:    certModeAutocert,
 			wantErr:     true,
 		},
 		{
 			name:           "autocert invalid secret format",
-			gatewayName:    "ingress",
+			instance:       "ingress1",
 			certMode:       certModeAutocert,
 			autocertSecret: "autocert-cache",
 			wantErr:        true,
 		},
 		{
 			name:           "autocert valid secret format",
-			gatewayName:    "ingress",
+			instance:       "ingress1",
 			certMode:       certModeAutocert,
 			autocertSecret: "ingress-dev/autocert-cache",
 		},
@@ -43,7 +43,7 @@ func TestValidateStartupConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateStartupConfig(tt.gatewayName, tt.certMode, tt.autocertSecret)
+			err := validateStartupConfig(tt.instance, tt.certMode, tt.autocertSecret)
 			if tt.wantErr && err == nil {
 				t.Fatalf("expected error but got nil")
 			}

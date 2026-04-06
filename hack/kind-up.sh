@@ -5,7 +5,6 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CLUSTER_NAME="${CLUSTER_NAME:-ingress-dev}"
 KUBECONFIG_PATH="${KUBECONFIG_PATH:-${ROOT_DIR}/.kube/config}"
 KIND_CONFIG_PATH="${ROOT_DIR}/hack/kind-config.yaml"
-GATEWAY_API_VERSION="${GATEWAY_API_VERSION:-v1.5.1}"
 
 if ! command -v kind >/dev/null 2>&1; then
   echo "kind is required (https://kind.sigs.k8s.io/)" >&2
@@ -24,8 +23,6 @@ fi
 
 kind get kubeconfig --name "${CLUSTER_NAME}" > "${KUBECONFIG_PATH}"
 export KUBECONFIG="${KUBECONFIG_PATH}"
-
-kubectl apply --server-side --force-conflicts -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml"
 
 echo "kind cluster ready: ${CLUSTER_NAME}"
 echo "kubeconfig: ${KUBECONFIG_PATH}"

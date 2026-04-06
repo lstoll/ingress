@@ -5,10 +5,6 @@ namespace: ingress-dev
 
 resources:
   - namespace.yaml
-  - gatewayclass.yaml
-  - gateway.yaml
-  - tlsroute.yaml
-  - tlsroute-terminate.yaml
   - ingress-rbac.yaml
   - backend-configmap.yaml
   - backend-deployment.yaml

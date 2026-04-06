@@ -2,45 +2,29 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"flag"
 	"fmt"
-	"net"
 	"os"
-	"strconv"
 
 	"github.com/oklog/run"
 	"inet.af/tcpproxy"
-	"k8s.io/apimachinery/pkg/types"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	k8sscheme "k8s.io/client-go/kubernetes/scheme"
-	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
 var scheme = k8sscheme.Scheme
 
-func init() {
-	utilruntime.Must(gatewayv1.AddToScheme(scheme))
-}
-
 const (
 	debugV = 4
 )
-
-type listenerConfig struct {
-	Name         string
-	ListenAddr   string
-	TerminateTLS bool
-}
 
 func main() {
 	ctx := context.Background()
@@ -51,13 +35,11 @@ func main() {
 	zapOpts.BindFlags(fs)
 
 	var (
-		addr             = fs.String("listen", "", "Address to listen on. If empty, derive from configured Gateway listener")
-		gatewayName      = fs.String("gateway-name", "", "Gateway name to configure this ingress instance from")
-		gatewayNamespace = fs.String("gateway-namespace", defaultNamespace(), "Gateway namespace")
-		listenerName     = fs.String("listener-name", "", "Optional Gateway listener name to scope routing and listen address selection")
-		watchNamespace   = fs.String("watch-namespace", "", "Optional namespace to watch routes/services in. Empty means all namespaces")
-		certMode         = fs.String("cert-mode", certModeSelfSigned, "Certificate mode for terminated TLS routes: self-signed or autocert")
-		autocertSecret   = fs.String("autocert-secret", "", "namespace/name secret for autocert cache (required when --cert-mode=autocert)")
+		addr           = fs.String("listen", "0.0.0.0:8443", "Address to listen on")
+		instance       = fs.String("instance", "", "Ingress instance name to select services (ingress.lds.li/instance label)")
+		watchNamespace = fs.String("watch-namespace", "", "Optional namespace to watch services in. Empty means all namespaces")
+		certMode       = fs.String("cert-mode", certModeSelfSigned, "Certificate mode for terminated TLS routes: self-signed or autocert")
+		autocertSecret = fs.String("autocert-secret", "", "namespace/name secret for autocert cache (required when --cert-mode=autocert)")
 	)
 
 	fs.Parse(os.Args[1:])
@@ -65,20 +47,12 @@ func main() {
 	logf.SetLogger(zap.New(zap.UseFlagOptions(zapOpts)))
 
 	var log = logf.Log.WithName("ingress")
-	if err := validateStartupConfig(*gatewayName, *certMode, *autocertSecret); err != nil {
+	if err := validateStartupConfig(*instance, *certMode, *autocertSecret); err != nil {
 		log.Error(err, "invalid startup configuration")
 		os.Exit(2)
 	}
 
 	cfg := config.GetConfigOrDie()
-	listeners, err := resolveListenerConfigs(ctx, cfg, types.NamespacedName{
-		Namespace: *gatewayNamespace,
-		Name:      *gatewayName,
-	}, *listenerName, *addr)
-	if err != nil {
-		log.Error(err, "resolving listen address from Gateway")
-		os.Exit(1)
-	}
 
 	rdb := &routedb{
 		logger: log,
@@ -99,12 +73,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	mgr, err := newMgr(cfg, *watchNamespace, &TLSRouteReconciler{
-		logger:           logf.Log,
-		rdb:              rdb,
-		gatewayName:      *gatewayName,
-		gatewayNamespace: *gatewayNamespace,
-		listenerName:     *listenerName,
+	mgr, err := newMgr(cfg, *watchNamespace, &ServiceReconciler{
+		logger:   logf.Log,
+		rdb:      rdb,
+		instance: *instance,
 	})
 	if err != nil {
 		log.Error(err, "creating manager")
@@ -131,9 +103,7 @@ func main() {
 	p := &tcpproxy.Proxy{}
 	proxyContext, proxyCancel := context.WithCancel(ctx)
 	g.Add(func() error {
-		for _, l := range listeners {
-			p.AddSNIMatchRoute(l.ListenAddr, MatchAny, d)
-		}
+		p.AddSNIMatchRoute(*addr, MatchAny, d)
 		if err := p.Start(); err != nil {
 			return err
 		}
@@ -148,25 +118,9 @@ func main() {
 		log.Error(err, "running")
 	}
 }
-
-func tlsServeConn(cp CertProvider, c net.Conn) error {
-	tlsConn := tls.Server(c, cp.TLSConfig())
-	if err := tlsConn.Handshake(); err != nil {
-		return err
-	}
-	return tlsConn.Close()
-}
-
-func defaultNamespace() string {
-	if ns := os.Getenv("POD_NAMESPACE"); ns != "" {
-		return ns
-	}
-	return "default"
-}
-
-func validateStartupConfig(gatewayName, certMode, autocertSecret string) error {
-	if gatewayName == "" {
-		return fmt.Errorf("--gateway-name must be set")
+func validateStartupConfig(instance, certMode, autocertSecret string) error {
+	if instance == "" {
+		return fmt.Errorf("--instance must be set")
 	}
 	if certMode == certModeAutocert && autocertSecret == "" {
 		return fmt.Errorf("--autocert-secret must be set when --cert-mode=autocert")
@@ -178,55 +132,7 @@ func validateStartupConfig(gatewayName, certMode, autocertSecret string) error {
 	}
 	return nil
 }
-
-func resolveListenerConfigs(ctx context.Context, cfg *rest.Config, gatewayNN types.NamespacedName, listenerName, explicitListenAddr string) ([]listenerConfig, error) {
-	if explicitListenAddr != "" {
-		return []listenerConfig{{
-			Name:       "explicit",
-			ListenAddr: explicitListenAddr,
-		}}, nil
-	}
-
-	c, err := client.New(cfg, client.Options{Scheme: scheme})
-	if err != nil {
-		return nil, fmt.Errorf("creating client: %w", err)
-	}
-
-	var gw gatewayv1.Gateway
-	if err := c.Get(ctx, gatewayNN, &gw); err != nil {
-		return nil, fmt.Errorf("getting gateway %s: %w", gatewayNN, err)
-	}
-
-	var out []listenerConfig
-	for _, listener := range gw.Spec.Listeners {
-		if listenerName != "" && string(listener.Name) != listenerName {
-			continue
-		}
-		if listener.Protocol != gatewayv1.TLSProtocolType {
-			continue
-		}
-		terminateTLS := false
-		if listener.TLS != nil && listener.TLS.Mode != nil && *listener.TLS.Mode == gatewayv1.TLSModeTerminate {
-			terminateTLS = true
-		}
-		out = append(out, listenerConfig{
-			Name:         string(listener.Name),
-			ListenAddr:   net.JoinHostPort("0.0.0.0", strconv.Itoa(int(listener.Port))),
-			TerminateTLS: terminateTLS,
-		})
-	}
-
-	if len(out) > 0 {
-		return out, nil
-	}
-
-	if listenerName == "" {
-		return nil, fmt.Errorf("gateway %s has no TLS listeners", gatewayNN)
-	}
-	return nil, fmt.Errorf("gateway %s has no TLS listener named %q", gatewayNN, listenerName)
-}
-
-func newMgr(cfg *rest.Config, watchNamespace string, reconciler *TLSRouteReconciler) (manager.Manager, error) {
+func newMgr(cfg *rest.Config, watchNamespace string, reconciler *ServiceReconciler) (manager.Manager, error) {
 	opts := manager.Options{
 		Scheme: scheme,
 	}
@@ -247,7 +153,7 @@ func newMgr(cfg *rest.Config, watchNamespace string, reconciler *TLSRouteReconci
 
 	err = builder.
 		ControllerManagedBy(mgr).
-		For(&gatewayv1.TLSRoute{}).
+		For(&corev1.Service{}).
 		Complete(reconciler)
 	if err != nil {
 		return nil, err

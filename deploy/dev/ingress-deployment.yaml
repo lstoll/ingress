@@ -20,11 +20,8 @@ spec:
           command:
             - /ingress
           args:
-            - --gateway-name=ingress
-            - --gateway-namespace=ingress-dev
+            - --instance=ingress1
             - --cert-mode=self-signed
           ports:
-            - containerPort: 443
-              name: pass-tls
-            - containerPort: 4443
-              name: term-tls
+            - containerPort: 8443
+              name: tls

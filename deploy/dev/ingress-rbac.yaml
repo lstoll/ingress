@@ -8,9 +8,6 @@ kind: ClusterRole
 metadata:
   name: ingress
 rules:
-  - apiGroups: ["gateway.networking.k8s.io"]
-    resources: ["gateways", "tlsroutes"]
-    verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["get", "list", "watch"]
