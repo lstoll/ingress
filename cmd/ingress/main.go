@@ -2,12 +2,17 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"flag"
+	"net"
 	"os"
+	"strconv"
 
 	"github.com/oklog/run"
 	"inet.af/tcpproxy"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -38,7 +43,10 @@ func main() {
 	zapOpts.BindFlags(fs)
 
 	var (
-		addr = fs.String("listen", "0.0.0.0:8080", "Address to listen on")
+		addr             = fs.String("listen", "", "Address to listen on. If empty, derive from configured Gateway listener")
+		gatewayName      = fs.String("gateway-name", "", "Gateway name to configure this ingress instance from")
+		gatewayNamespace = fs.String("gateway-namespace", defaultNamespace(), "Gateway namespace")
+		listenerName     = fs.String("listener-name", "", "Optional Gateway listener name to scope routing and listen address selection")
 	)
 
 	fs.Parse(os.Args[1:])
@@ -46,8 +54,20 @@ func main() {
 	logf.SetLogger(zap.New(zap.UseFlagOptions(zapOpts)))
 
 	var log = logf.Log.WithName("ingress")
+	if *gatewayName == "" {
+		log.Error(fmt.Errorf("missing required flag"), "--gateway-name must be set")
+		os.Exit(2)
+	}
 
 	cfg := config.GetConfigOrDie()
+	resolvedListenAddr, err := resolveListenAddr(ctx, cfg, types.NamespacedName{
+		Namespace: *gatewayNamespace,
+		Name:      *gatewayName,
+	}, *listenerName, *addr)
+	if err != nil {
+		log.Error(err, "resolving listen address from Gateway")
+		os.Exit(1)
+	}
 
 	rdb := &routedb{
 		logger: log,
@@ -55,8 +75,11 @@ func main() {
 	}
 
 	mgr, err := newMgr(cfg, &TLSRouteReconciler{
-		logger: logf.Log,
-		rdb:    rdb,
+		logger:           logf.Log,
+		rdb:              rdb,
+		gatewayName:      *gatewayName,
+		gatewayNamespace: *gatewayNamespace,
+		listenerName:     *listenerName,
 	})
 	if err != nil {
 		log.Error(err, "creating manager")
@@ -82,7 +105,7 @@ func main() {
 	p := &tcpproxy.Proxy{}
 	g.Add(func() error {
 
-		p.AddSNIMatchRoute(*addr, MatchAny, d)
+		p.AddSNIMatchRoute(resolvedListenAddr, MatchAny, d)
 		return p.Start()
 	}, func(error) {
 		_ = p.Close()
@@ -91,6 +114,44 @@ func main() {
 	if err := g.Run(); err != nil {
 		log.Error(err, "running")
 	}
+}
+
+func defaultNamespace() string {
+	if ns := os.Getenv("POD_NAMESPACE"); ns != "" {
+		return ns
+	}
+	return "default"
+}
+
+func resolveListenAddr(ctx context.Context, cfg *rest.Config, gatewayNN types.NamespacedName, listenerName, explicitListenAddr string) (string, error) {
+	if explicitListenAddr != "" {
+		return explicitListenAddr, nil
+	}
+
+	c, err := client.New(cfg, client.Options{Scheme: scheme})
+	if err != nil {
+		return "", fmt.Errorf("creating client: %w", err)
+	}
+
+	var gw gatewayv1.Gateway
+	if err := c.Get(ctx, gatewayNN, &gw); err != nil {
+		return "", fmt.Errorf("getting gateway %s: %w", gatewayNN, err)
+	}
+
+	for _, listener := range gw.Spec.Listeners {
+		if listenerName != "" && string(listener.Name) != listenerName {
+			continue
+		}
+		if listener.Protocol != gatewayv1.TLSProtocolType {
+			continue
+		}
+		return net.JoinHostPort("0.0.0.0", strconv.Itoa(int(listener.Port))), nil
+	}
+
+	if listenerName == "" {
+		return "", fmt.Errorf("gateway %s has no TLS listeners", gatewayNN)
+	}
+	return "", fmt.Errorf("gateway %s has no TLS listener named %q", gatewayNN, listenerName)
 }
 
 func newMgr(cfg *rest.Config, reconciler *TLSRouteReconciler) (manager.Manager, error) {

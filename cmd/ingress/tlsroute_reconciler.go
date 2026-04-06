@@ -19,6 +19,10 @@ type TLSRouteReconciler struct {
 	Client client.Client
 	logger logr.Logger
 	rdb    *routedb
+
+	gatewayName      string
+	gatewayNamespace string
+	listenerName     string
 }
 
 func (s *TLSRouteReconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
@@ -33,6 +37,11 @@ func (s *TLSRouteReconciler) Reconcile(ctx context.Context, req reconcile.Reques
 		}
 		s.logger.Error(err, "getting TLSRoute", "object", req.NamespacedName)
 		return reconcile.Result{}, fmt.Errorf("getting tlsroute: %w", err)
+	}
+	if !s.managesRoute(&tlsRoute) {
+		s.logger.V(debugV).Info("ignoring TLSRoute not attached to configured Gateway", "object", req.NamespacedName)
+		s.rdb.RemoveRoute(req.NamespacedName)
+		return reconcile.Result{}, nil
 	}
 
 	var hostnames []string
@@ -103,4 +112,41 @@ func (s *TLSRouteReconciler) Reconcile(ctx context.Context, req reconcile.Reques
 
 	s.logger.Info("successfully configured TLSRoute proxy targets", "object", req.NamespacedName, "hostnames", len(hostnames))
 	return reconcile.Result{}, nil
+}
+
+func (s *TLSRouteReconciler) managesRoute(tlsRoute *gatewayv1.TLSRoute) bool {
+	if s.gatewayName == "" {
+		return true
+	}
+
+	for _, parentRef := range tlsRoute.Spec.ParentRefs {
+		if parentRef.Name != gatewayv1.ObjectName(s.gatewayName) {
+			continue
+		}
+
+		parentNamespace := tlsRoute.Namespace
+		if parentRef.Namespace != nil {
+			parentNamespace = string(*parentRef.Namespace)
+		}
+		if parentNamespace != s.gatewayNamespace {
+			continue
+		}
+
+		// Group defaults to gateway.networking.k8s.io and Kind defaults to Gateway.
+		if parentRef.Group != nil && *parentRef.Group != gatewayv1.GroupName {
+			continue
+		}
+		if parentRef.Kind != nil && *parentRef.Kind != "Gateway" {
+			continue
+		}
+
+		if s.listenerName != "" {
+			if parentRef.SectionName == nil || string(*parentRef.SectionName) != s.listenerName {
+				continue
+			}
+		}
+
+		return true
+	}
+	return false
 }

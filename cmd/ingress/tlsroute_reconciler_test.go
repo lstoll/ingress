@@ -49,8 +49,11 @@ func TestTLSRouteReconcile(t *testing.T) {
 	}
 
 	r := &TLSRouteReconciler{
-		logger: testLogger(),
-		rdb:    rdb,
+		logger:           testLogger(),
+		rdb:              rdb,
+		gatewayName:      "example-gateway",
+		gatewayNamespace: "default",
+		listenerName:     "tls",
 	}
 
 	mgr, err := newMgr(cfg, r)
@@ -87,8 +90,43 @@ func TestTLSRouteReconcile(t *testing.T) {
 	}
 
 	kindService := gatewayv1.Kind("Service")
+	kindGateway := gatewayv1.Kind("Gateway")
 	port1234 := gatewayv1.PortNumber(1234)
 	tlsRouteName := "example-route"
+	gatewayName := "example-gateway"
+	listener443 := gatewayv1.SectionName("tls")
+
+	gatewayClass := &gatewayv1.GatewayClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "example-gwclass",
+		},
+		Spec: gatewayv1.GatewayClassSpec{
+			ControllerName: "example.com/ingress",
+		},
+	}
+	if err := c.Create(ctx, gatewayClass); err != nil {
+		t.Fatal(err)
+	}
+
+	gateway := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      gatewayName,
+			Namespace: svcNamespace,
+		},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: gatewayv1.ObjectName(gatewayClass.Name),
+			Listeners: []gatewayv1.Listener{
+				{
+					Name:     listener443,
+					Protocol: gatewayv1.TLSProtocolType,
+					Port:     443,
+				},
+			},
+		},
+	}
+	if err := c.Create(ctx, gateway); err != nil {
+		t.Fatal(err)
+	}
 
 	route1 := &gatewayv1.TLSRoute{
 		ObjectMeta: metav1.ObjectMeta{
@@ -96,6 +134,15 @@ func TestTLSRouteReconcile(t *testing.T) {
 			Namespace: svcNamespace,
 		},
 		Spec: gatewayv1.TLSRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{
+					{
+						Name:        gatewayv1.ObjectName(gatewayName),
+						Kind:        &kindGateway,
+						SectionName: &listener443,
+					},
+				},
+			},
 			Hostnames: []gatewayv1.Hostname{
 				gatewayv1.Hostname("foo.example.com"),
 			},
