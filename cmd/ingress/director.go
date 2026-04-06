@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"sync"
 
+	"golang.org/x/net/http2"
 	"inet.af/tcpproxy"
 )
 
@@ -95,6 +96,14 @@ func (d *director) handleTerminateRoute(c *tcpproxy.Conn, rt route) error {
 
 		oneConnLn := newSingleConnListener(tlsConn)
 		hs := &http.Server{Handler: rt.HTTPHandler}
+		if err := http2.ConfigureServer(hs, &http2.Server{}); err != nil {
+			return fmt.Errorf("configuring http2 server: %w", err)
+		}
+		hs.ConnState = func(conn net.Conn, state http.ConnState) {
+			if conn == tlsConn && (state == http.StateClosed || state == http.StateHijacked) {
+				oneConnLn.notifyDone()
+			}
+		}
 		errCh := make(chan error, 1)
 		go func() {
 			errCh <- hs.Serve(oneConnLn)
@@ -154,24 +163,21 @@ func (s *singleConnListener) Accept() (net.Conn, error) {
 		return nil, net.ErrClosed
 	}
 	s.used = true
-	return &notifyingConn{
-		Conn: s.conn,
-		onClose: func() {
-			s.once.Do(func() {
-				close(s.done)
-			})
-		},
-	}, nil
+	return s.conn, nil
 }
 
 func (s *singleConnListener) Close() error {
-	s.once.Do(func() {
-		close(s.done)
-	})
+	s.notifyDone()
 	if s.conn != nil {
 		return s.conn.Close()
 	}
 	return nil
+}
+
+func (s *singleConnListener) notifyDone() {
+	s.once.Do(func() {
+		close(s.done)
+	})
 }
 
 func (s *singleConnListener) Addr() net.Addr {
@@ -179,17 +185,6 @@ func (s *singleConnListener) Addr() net.Addr {
 		return s.conn.LocalAddr()
 	}
 	return &net.TCPAddr{}
-}
-
-type notifyingConn struct {
-	net.Conn
-	once    sync.Once
-	onClose func()
-}
-
-func (n *notifyingConn) Close() error {
-	n.once.Do(n.onClose)
-	return n.Conn.Close()
 }
 
 // writeConnErr is used for handling conns we can't handle

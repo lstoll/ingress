@@ -58,6 +58,7 @@ func newCertProvider(mode string, cfg certProviderConfig) (CertProvider, error) 
 func (p *selfSignedCertProvider) TLSConfig() *tls.Config {
 	return &tls.Config{
 		MinVersion:     tls.VersionTLS12,
+		NextProtos:     []string{"h2", "http/1.1"},
 		GetCertificate: p.getCertificate,
 	}
 }
@@ -107,7 +108,7 @@ func generateSelfSignedCert(host string) (*tls.Certificate, error) {
 			x509.ExtKeyUsageServerAuth,
 		},
 		BasicConstraintsValid: true,
-		DNSNames:               []string{host},
+		DNSNames:              []string{host},
 	}
 
 	if ip := net.ParseIP(host); ip != nil {
