@@ -44,7 +44,9 @@ func main() {
 		logLevel          = fs.String("log-level", envOrDefault("INGRESS_LOG_LEVEL", "info"), "Log level: debug, info, warn, error")
 	)
 
-	fs.Parse(os.Args[1:])
+	if err := fs.Parse(os.Args[1:]); err != nil {
+		os.Exit(2)
+	}
 
 	appLogger, err := setupLogger(*logLevel, os.Stdout, term.IsTerminal(int(os.Stdout.Fd())))
 	if err != nil {

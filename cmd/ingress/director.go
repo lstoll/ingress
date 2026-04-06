@@ -84,7 +84,9 @@ func (d *director) handleTerminateRoute(c *tcpproxy.Conn, rt route) error {
 	if err := tlsConn.Handshake(); err != nil {
 		return err
 	}
-	defer tlsConn.Close()
+	defer func() {
+		_ = tlsConn.Close()
+	}()
 
 	if rt.Mode == modeHTTPS {
 		if rt.HTTPHandler == nil {
@@ -111,7 +113,9 @@ func (d *director) handleTerminateRoute(c *tcpproxy.Conn, rt route) error {
 	if err != nil {
 		return err
 	}
-	defer upstreamConn.Close()
+	defer func() {
+		_ = upstreamConn.Close()
+	}()
 
 	var wg sync.WaitGroup
 	wg.Add(2)

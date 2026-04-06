@@ -63,12 +63,13 @@ func (r *routedb) SetRoute(owner types.NamespacedName, hostnames []string, targe
 			TargetAddr: targetAddr,
 			Mode:       mode,
 		}
-		if mode == modeTLSPassthrough {
+		switch mode {
+		case modeTLSPassthrough:
 			rt.Proxy = &tcpproxy.DialProxy{
 				Addr:                 targetAddr,
 				ProxyProtocolVersion: ppVersion,
 			}
-		} else if mode == modeHTTPS {
+		case modeHTTPS:
 			upstreamURL, err := url.Parse("http://" + targetAddr)
 			if err != nil {
 				return fmt.Errorf("parsing upstream url for host %s: %w", h, err)
@@ -88,13 +89,13 @@ func (r *routedb) SetRoute(owner types.NamespacedName, hostnames []string, targe
 			rt.OIDC = oidcCfg
 		}
 		r.routes[h] = route{
-			Owner:      rt.Owner,
-			TargetAddr: rt.TargetAddr,
-			Mode:       rt.Mode,
-			Proxy:      rt.Proxy,
-			HTTPProxy:  rt.HTTPProxy,
+			Owner:       rt.Owner,
+			TargetAddr:  rt.TargetAddr,
+			Mode:        rt.Mode,
+			Proxy:       rt.Proxy,
+			HTTPProxy:   rt.HTTPProxy,
 			HTTPHandler: rt.HTTPHandler,
-			OIDC:       rt.OIDC,
+			OIDC:        rt.OIDC,
 		}
 		r.logger.Info("set route", "hostname", h, "owner", owner.String(), "mode", mode, "target", targetAddr, "proxy_proto", proxyProto)
 	}

@@ -41,7 +41,7 @@ func (m *mockProxySource) DialProxyFor(hostName string) (*tcpproxy.DialProxy, er
 
 func TestDirector(t *testing.T) {
 	host1server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("host-1"))
+		_, _ = w.Write([]byte("host-1"))
 	}))
 	host1server.TLS = mustTLSCert(t, "host-1")
 
@@ -52,7 +52,7 @@ func TestDirector(t *testing.T) {
 	host1server.StartTLS()
 
 	host2server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("host-2"))
+		_, _ = w.Write([]byte("host-2"))
 	}))
 	host2server.TLS = mustTLSCert(t, "host-2")
 
@@ -90,7 +90,9 @@ func TestDirector(t *testing.T) {
 	if err := p.Start(); err != nil {
 		t.Fatal(err)
 	}
-	defer p.Close()
+	defer func() {
+		_ = p.Close()
+	}()
 
 	{
 		host1client := &http.Client{
@@ -221,7 +223,9 @@ func TestDirectorTLSTerminate(t *testing.T) {
 	if err := p.Start(); err != nil {
 		t.Fatal(err)
 	}
-	defer p.Close()
+	defer func() {
+		_ = p.Close()
+	}()
 
 	client := &http.Client{
 		Transport: &http.Transport{
@@ -239,7 +243,9 @@ func TestDirectorTLSTerminate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatal(err)
