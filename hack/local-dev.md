@@ -25,7 +25,9 @@ The checked-in `.envrc` points `KUBECONFIG` at `.kube/config` in this repo.
 
 This script:
 
-- creates a kind cluster named `ingress-dev` with host port `8443` mapped to NodePort `30443`
+- creates a kind cluster named `ingress-dev` with:
+  - host port `8443` mapped to NodePort `30443` (passthrough)
+  - host port `9443` mapped to NodePort `31443` (terminate)
 - writes kubeconfig to `.kube/config`
 - installs Gateway API standard CRDs (server-side apply)
 
@@ -37,18 +39,12 @@ The local deployment currently runs `ingress` with `--cert-mode=self-signed` as 
 skaffold run
 ```
 
-Skaffold builds the local `ingress` image and applies `deploy/dev` manifests (Gateway, TLSRoute, ingress workload, and demo TLS backend).
+Skaffold builds the local `ingress` image and applies `deploy/dev` manifests (Gateway, two TLSRoutes, one ingress deployment, and demo backends).
 
-By default, the ingress process watches routes cluster-wide and filters to the configured Gateway via `parentRefs`.
-The demo `TLSRoute` disables proxy-protocol so a plain nginx TLS backend can terminate the connection directly.
+Ingress runs in two modes simultaneously (different listeners and hostnames):
 
-To test ingress-side TLS termination (TLS at ingress, HTTP backend), use:
-
-```bash
-skaffold run -p terminate
-```
-
-This uses `deploy/dev-terminate`, switches the Gateway listener to `Terminate`, and points the backend to plain HTTP on port `8080`.
+- `pass-tls` listener on port `443` for passthrough mode
+- `term-tls` listener on port `4443` for ingress-side TLS termination
 
 ## Production-style autocert mode
 
@@ -58,7 +54,6 @@ For real certificate issuance, run ingress with `--cert-mode=autocert` and provi
 /ingress \
   --gateway-name=ingress \
   --gateway-namespace=ingress-dev \
-  --listener-name=tls \
   --cert-mode=autocert \
   --autocert-secret=ingress-dev/autocert-cache
 ```
@@ -78,10 +73,10 @@ kubectl -n ingress-dev get gateway,service,tlsroute,pods
 kubectl -n ingress-dev logs deploy/ingress --tail=100
 ```
 
-Use curl with SNI/hostname:
+Passthrough curl:
 
 ```bash
-curl -vk --resolve app.localtest.me:8443:127.0.0.1 https://app.localtest.me:8443/
+curl -vk --resolve pass.localtest.me:8443:127.0.0.1 https://pass.localtest.me:8443/
 ```
 
 Expected response body:
@@ -90,7 +85,13 @@ Expected response body:
 hello from demo backend (tls)
 ```
 
-When using `-p terminate`, expected response body becomes:
+Terminate curl:
+
+```bash
+curl -vk --resolve term.localtest.me:9443:127.0.0.1 https://term.localtest.me:9443/
+```
+
+Expected response body:
 
 ```text
 hello from demo backend (http)

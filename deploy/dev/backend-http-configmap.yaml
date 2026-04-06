@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: demo-backend-http-nginx
+data:
+  default.conf: |
+    server {
+      listen 8080;
+      server_name term.localtest.me;
+
+      location / {
+        add_header Content-Type text/plain;
+        return 200 "hello from demo backend (http)\n";
+      }
+    }

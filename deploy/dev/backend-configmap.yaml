@@ -6,7 +6,7 @@ data:
   default.conf: |
     server {
       listen 8443 ssl;
-      server_name app.localtest.me;
+      server_name pass.localtest.me;
 
       ssl_certificate /etc/nginx/tls/tls.crt;
       ssl_certificate_key /etc/nginx/tls/tls.key;

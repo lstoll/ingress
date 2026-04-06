@@ -8,10 +8,14 @@ resources:
   - gatewayclass.yaml
   - gateway.yaml
   - tlsroute.yaml
+  - tlsroute-terminate.yaml
   - ingress-rbac.yaml
   - backend-configmap.yaml
   - backend-deployment.yaml
   - backend-service.yaml
+  - backend-http-configmap.yaml
+  - backend-http-deployment.yaml
+  - backend-http-service.yaml
   - ingress-deployment.yaml
   - ingress-service.yaml
 

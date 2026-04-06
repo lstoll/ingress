@@ -1,15 +1,15 @@
 apiVersion: gateway.networking.k8s.io/v1
 kind: TLSRoute
 metadata:
-  name: demo
+  name: demo-pass
   annotations:
     service.beta.lds.li/disable-proxy-proto: "true"
 spec:
   parentRefs:
     - name: ingress
-      sectionName: tls
+      sectionName: pass-tls
   hostnames:
-    - app.localtest.me
+    - pass.localtest.me
   rules:
     - backendRefs:
         - name: demo-backend

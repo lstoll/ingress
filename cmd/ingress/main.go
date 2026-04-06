@@ -36,6 +36,12 @@ const (
 	debugV = 4
 )
 
+type listenerConfig struct {
+	Name         string
+	ListenAddr   string
+	TerminateTLS bool
+}
+
 func main() {
 	ctx := context.Background()
 
@@ -65,7 +71,7 @@ func main() {
 	}
 
 	cfg := config.GetConfigOrDie()
-	resolvedListenAddr, terminateTLS, err := resolveListenerConfig(ctx, cfg, types.NamespacedName{
+	listeners, err := resolveListenerConfigs(ctx, cfg, types.NamespacedName{
 		Namespace: *gatewayNamespace,
 		Name:      *gatewayName,
 	}, *listenerName, *addr)
@@ -99,7 +105,6 @@ func main() {
 		gatewayName:      *gatewayName,
 		gatewayNamespace: *gatewayNamespace,
 		listenerName:     *listenerName,
-		terminateTLS:     terminateTLS,
 	})
 	if err != nil {
 		log.Error(err, "creating manager")
@@ -126,8 +131,9 @@ func main() {
 	p := &tcpproxy.Proxy{}
 	proxyContext, proxyCancel := context.WithCancel(ctx)
 	g.Add(func() error {
-
-		p.AddSNIMatchRoute(resolvedListenAddr, MatchAny, d)
+		for _, l := range listeners {
+			p.AddSNIMatchRoute(l.ListenAddr, MatchAny, d)
+		}
 		if err := p.Start(); err != nil {
 			return err
 		}
@@ -173,21 +179,25 @@ func validateStartupConfig(gatewayName, certMode, autocertSecret string) error {
 	return nil
 }
 
-func resolveListenerConfig(ctx context.Context, cfg *rest.Config, gatewayNN types.NamespacedName, listenerName, explicitListenAddr string) (string, bool, error) {
+func resolveListenerConfigs(ctx context.Context, cfg *rest.Config, gatewayNN types.NamespacedName, listenerName, explicitListenAddr string) ([]listenerConfig, error) {
 	if explicitListenAddr != "" {
-		return explicitListenAddr, false, nil
+		return []listenerConfig{{
+			Name:       "explicit",
+			ListenAddr: explicitListenAddr,
+		}}, nil
 	}
 
 	c, err := client.New(cfg, client.Options{Scheme: scheme})
 	if err != nil {
-		return "", false, fmt.Errorf("creating client: %w", err)
+		return nil, fmt.Errorf("creating client: %w", err)
 	}
 
 	var gw gatewayv1.Gateway
 	if err := c.Get(ctx, gatewayNN, &gw); err != nil {
-		return "", false, fmt.Errorf("getting gateway %s: %w", gatewayNN, err)
+		return nil, fmt.Errorf("getting gateway %s: %w", gatewayNN, err)
 	}
 
+	var out []listenerConfig
 	for _, listener := range gw.Spec.Listeners {
 		if listenerName != "" && string(listener.Name) != listenerName {
 			continue
@@ -199,13 +209,21 @@ func resolveListenerConfig(ctx context.Context, cfg *rest.Config, gatewayNN type
 		if listener.TLS != nil && listener.TLS.Mode != nil && *listener.TLS.Mode == gatewayv1.TLSModeTerminate {
 			terminateTLS = true
 		}
-		return net.JoinHostPort("0.0.0.0", strconv.Itoa(int(listener.Port))), terminateTLS, nil
+		out = append(out, listenerConfig{
+			Name:         string(listener.Name),
+			ListenAddr:   net.JoinHostPort("0.0.0.0", strconv.Itoa(int(listener.Port))),
+			TerminateTLS: terminateTLS,
+		})
+	}
+
+	if len(out) > 0 {
+		return out, nil
 	}
 
 	if listenerName == "" {
-		return "", false, fmt.Errorf("gateway %s has no TLS listeners", gatewayNN)
+		return nil, fmt.Errorf("gateway %s has no TLS listeners", gatewayNN)
 	}
-	return "", false, fmt.Errorf("gateway %s has no TLS listener named %q", gatewayNN, listenerName)
+	return nil, fmt.Errorf("gateway %s has no TLS listener named %q", gatewayNN, listenerName)
 }
 
 func newMgr(cfg *rest.Config, watchNamespace string, reconciler *TLSRouteReconciler) (manager.Manager, error) {

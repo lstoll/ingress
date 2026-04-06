@@ -23,7 +23,6 @@ type TLSRouteReconciler struct {
 	gatewayName      string
 	gatewayNamespace string
 	listenerName     string
-	terminateTLS     bool
 }
 
 func (s *TLSRouteReconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
@@ -106,7 +105,12 @@ func (s *TLSRouteReconciler) Reconcile(ctx context.Context, req reconcile.Reques
 		proxyProto = false
 	}
 
-	if err := s.rdb.SetRoute(req.NamespacedName, hostnames, targetAddr, proxyProto, s.terminateTLS); err != nil {
+	terminateTLS, err := s.routeTerminatesTLS(ctx, &tlsRoute)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+
+	if err := s.rdb.SetRoute(req.NamespacedName, hostnames, targetAddr, proxyProto, terminateTLS); err != nil {
 		s.logger.Error(err, "adding TLSRoute to rdb", "object", req.NamespacedName)
 		return reconcile.Result{}, err
 	}
@@ -150,4 +154,58 @@ func (s *TLSRouteReconciler) managesRoute(tlsRoute *gatewayv1.TLSRoute) bool {
 		return true
 	}
 	return false
+}
+
+func (s *TLSRouteReconciler) routeTerminatesTLS(ctx context.Context, tlsRoute *gatewayv1.TLSRoute) (bool, error) {
+	var gw gatewayv1.Gateway
+	gwNN := types.NamespacedName{
+		Namespace: s.gatewayNamespace,
+		Name:      s.gatewayName,
+	}
+	if err := s.Client.Get(ctx, gwNN, &gw); err != nil {
+		return false, fmt.Errorf("getting gateway %s for route mode: %w", gwNN, err)
+	}
+
+	listenerModes := map[string]bool{}
+	for _, l := range gw.Spec.Listeners {
+		if l.Protocol != gatewayv1.TLSProtocolType {
+			continue
+		}
+		terminate := false
+		if l.TLS != nil && l.TLS.Mode != nil && *l.TLS.Mode == gatewayv1.TLSModeTerminate {
+			terminate = true
+		}
+		listenerModes[string(l.Name)] = terminate
+	}
+
+	for _, parentRef := range tlsRoute.Spec.ParentRefs {
+		if parentRef.Name != gatewayv1.ObjectName(s.gatewayName) {
+			continue
+		}
+		parentNamespace := tlsRoute.Namespace
+		if parentRef.Namespace != nil {
+			parentNamespace = string(*parentRef.Namespace)
+		}
+		if parentNamespace != s.gatewayNamespace {
+			continue
+		}
+		if parentRef.Group != nil && *parentRef.Group != gatewayv1.GroupName {
+			continue
+		}
+		if parentRef.Kind != nil && *parentRef.Kind != "Gateway" {
+			continue
+		}
+		if parentRef.SectionName == nil {
+			continue
+		}
+		if s.listenerName != "" && string(*parentRef.SectionName) != s.listenerName {
+			continue
+		}
+
+		if terminate, ok := listenerModes[string(*parentRef.SectionName)]; ok {
+			return terminate, nil
+		}
+	}
+
+	return false, nil
 }

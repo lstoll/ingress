@@ -1,0 +1,15 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: TLSRoute
+metadata:
+  name: demo-terminate
+spec:
+  parentRefs:
+    - name: ingress
+      sectionName: term-tls
+  hostnames:
+    - term.localtest.me
+  rules:
+    - backendRefs:
+        - name: demo-backend-http
+          kind: Service
+          port: 8080
