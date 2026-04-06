@@ -11,9 +11,11 @@ import (
 	"os"
 	"runtime/debug"
 	"strings"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/oklog/run"
+	proxyproto "github.com/pires/go-proxyproto"
 	"golang.org/x/term"
 	"inet.af/tcpproxy"
 	corev1 "k8s.io/api/core/v1"
@@ -36,15 +38,17 @@ func main() {
 	fs := flag.NewFlagSet("ingress", flag.ExitOnError)
 
 	var (
-		tlsListen         = fs.String("tls-listen", "0.0.0.0:443", "TLS listener address")
-		httpListen        = fs.String("http-listen", "", "Optional plain HTTP listener for HTTPS redirects")
-		httpsRedirectPort = fs.String("https-redirect-port", "", "Optional explicit HTTPS port for redirects")
-		instance          = fs.String("instance", "", "Ingress instance name to select services (ingress.lds.li/instance label)")
-		watchNamespace    = fs.String("watch-namespace", "", "Optional namespace to watch services in. Empty means all namespaces")
-		certMode          = fs.String("cert-mode", certModeSelfSigned, "Certificate mode for terminated TLS routes: self-signed or autocert")
-		autocertSecret    = fs.String("autocert-secret", "", "namespace/name secret for autocert cache (required when --cert-mode=autocert)")
-		logLevel          = fs.String("log-level", envOrDefault("INGRESS_LOG_LEVEL", "info"), "Log level: debug, info, warn, error")
-		showVersion       = fs.Bool("version", false, "Print version and exit")
+		tlsListen               = fs.String("tls-listen", "0.0.0.0:443", "TLS listener address")
+		listenProxyProto        = fs.Bool("listen-proxy-protocol", false, "Enable Proxy Protocol parsing on incoming frontend listeners")
+		listenProxyProtoTimeout = fs.Duration("listen-proxy-protocol-timeout", 10*time.Second, "Timeout for reading Proxy Protocol header on incoming frontend listeners")
+		httpListen              = fs.String("http-listen", "", "Optional plain HTTP listener for HTTPS redirects")
+		httpsRedirectPort       = fs.String("https-redirect-port", "", "Optional explicit HTTPS port for redirects")
+		instance                = fs.String("instance", "", "Ingress instance name to select services (ingress.lds.li/instance label)")
+		watchNamespace          = fs.String("watch-namespace", "", "Optional namespace to watch services in. Empty means all namespaces")
+		certMode                = fs.String("cert-mode", certModeSelfSigned, "Certificate mode for terminated TLS routes: self-signed or autocert")
+		autocertSecret          = fs.String("autocert-secret", "", "namespace/name secret for autocert cache (required when --cert-mode=autocert)")
+		logLevel                = fs.String("log-level", envOrDefault("INGRESS_LOG_LEVEL", "info"), "Log level: debug, info, warn, error")
+		showVersion             = fs.Bool("version", false, "Print version and exit")
 	)
 
 	if err := fs.Parse(os.Args[1:]); err != nil {
@@ -72,6 +76,8 @@ func main() {
 		"version", version,
 		"instance", *instance,
 		"tls_listen", *tlsListen,
+		"listen_proxy_protocol", *listenProxyProto,
+		"listen_proxy_protocol_timeout", listenProxyProtoTimeout.String(),
 		"http_listen", *httpListen,
 		"watch_namespace", *watchNamespace,
 		"cert_mode", *certMode,
@@ -128,6 +134,11 @@ func main() {
 	}
 
 	p := &tcpproxy.Proxy{}
+	if *listenProxyProto {
+		p.ListenFunc = func(network, laddr string) (net.Listener, error) {
+			return listenWithOptionalProxyProto(network, laddr, *listenProxyProto, *listenProxyProtoTimeout)
+		}
+	}
 	proxyContext, proxyCancel := context.WithCancel(ctx)
 	g.Add(func() error {
 		log.Info("starting TLS proxy listener", "addr", *tlsListen)
@@ -165,7 +176,11 @@ func main() {
 		}
 		g.Add(func() error {
 			log.Info("starting HTTP redirect listener", "addr", *httpListen)
-			return hs.ListenAndServe()
+			ln, err := listenWithOptionalProxyProto("tcp", *httpListen, *listenProxyProto, *listenProxyProtoTimeout)
+			if err != nil {
+				return err
+			}
+			return hs.Serve(ln)
 		}, func(error) {
 			_ = hs.Close()
 		})
@@ -174,6 +189,20 @@ func main() {
 	if err := g.Run(); err != nil {
 		log.Error("running", "error", err)
 	}
+}
+
+func listenWithOptionalProxyProto(network, addr string, enabled bool, timeout time.Duration) (net.Listener, error) {
+	ln, err := net.Listen(network, addr)
+	if err != nil {
+		return nil, err
+	}
+	if !enabled {
+		return ln, nil
+	}
+	return &proxyproto.Listener{
+		Listener:          ln,
+		ReadHeaderTimeout: timeout,
+	}, nil
 }
 
 func setupLogger(level string, out io.Writer, interactive bool) (*slog.Logger, error) {
