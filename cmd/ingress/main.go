@@ -11,7 +11,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/go-logr/logr/slogr"
+	"github.com/go-logr/logr"
 	"github.com/oklog/run"
 	"golang.org/x/term"
 	"inet.af/tcpproxy"
@@ -27,10 +27,6 @@ import (
 )
 
 var scheme = k8sscheme.Scheme
-
-const (
-	debugV = 4
-)
 
 func main() {
 	ctx := context.Background()
@@ -56,7 +52,7 @@ func main() {
 		os.Exit(2)
 	}
 	slog.SetDefault(appLogger)
-	logf.SetLogger(slogr.NewLogr(appLogger.With("component", "controller-runtime").Handler()))
+	logf.SetLogger(logr.FromSlogHandler(appLogger.With("component", "controller-runtime").Handler()))
 
 	log := appLogger.With("component", "ingress")
 	if err := validateStartupConfig(*instance, *certMode, *autocertSecret); err != nil {

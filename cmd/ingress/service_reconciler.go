@@ -134,7 +134,7 @@ func (s *ServiceReconciler) managesService(svc *corev1.Service) bool {
 
 func splitCSV(v string) []string {
 	var out []string
-	for _, p := range strings.Split(v, ",") {
+	for p := range strings.SplitSeq(v, ",") {
 		p = strings.TrimSpace(p)
 		if p == "" {
 			continue
