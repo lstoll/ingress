@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"runtime/debug"
 	"strings"
 
 	"github.com/go-logr/logr"
@@ -30,6 +31,7 @@ var scheme = k8sscheme.Scheme
 
 func main() {
 	ctx := context.Background()
+	version := readVersion()
 
 	fs := flag.NewFlagSet("ingress", flag.ExitOnError)
 
@@ -42,10 +44,15 @@ func main() {
 		certMode          = fs.String("cert-mode", certModeSelfSigned, "Certificate mode for terminated TLS routes: self-signed or autocert")
 		autocertSecret    = fs.String("autocert-secret", "", "namespace/name secret for autocert cache (required when --cert-mode=autocert)")
 		logLevel          = fs.String("log-level", envOrDefault("INGRESS_LOG_LEVEL", "info"), "Log level: debug, info, warn, error")
+		showVersion       = fs.Bool("version", false, "Print version and exit")
 	)
 
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		os.Exit(2)
+	}
+	if *showVersion {
+		fmt.Println(version)
+		return
 	}
 
 	appLogger, err := setupLogger(*logLevel, os.Stdout, term.IsTerminal(int(os.Stdout.Fd())))
@@ -62,6 +69,7 @@ func main() {
 		os.Exit(2)
 	}
 	log.Info("starting ingress",
+		"version", version,
 		"instance", *instance,
 		"tls_listen", *tlsListen,
 		"http_listen", *httpListen,
@@ -196,6 +204,48 @@ func envOrDefault(key, fallback string) string {
 	}
 	return fallback
 }
+
+func readVersion() string {
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "unknown"
+	}
+
+	version := bi.Main.Version
+	if version == "" {
+		version = "devel"
+	}
+
+	var revision, vcsTime string
+	var modified bool
+	for _, s := range bi.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			revision = s.Value
+		case "vcs.time":
+			vcsTime = s.Value
+		case "vcs.modified":
+			modified = s.Value == "true"
+		}
+	}
+
+	parts := []string{version}
+	if revision != "" {
+		if len(revision) > 12 {
+			revision = revision[:12]
+		}
+		parts = append(parts, "rev="+revision)
+	}
+	if vcsTime != "" {
+		parts = append(parts, "time="+vcsTime)
+	}
+	if modified {
+		parts = append(parts, "dirty=true")
+	}
+
+	return strings.Join(parts, " ")
+}
+
 func validateStartupConfig(instance, certMode, autocertSecret string) error {
 	if instance == "" {
 		return fmt.Errorf("--instance must be set")
