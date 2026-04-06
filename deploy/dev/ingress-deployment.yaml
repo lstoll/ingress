@@ -1,0 +1,28 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingress
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ingress
+  template:
+    metadata:
+      labels:
+        app: ingress
+    spec:
+      serviceAccountName: ingress
+      containers:
+        - name: ingress
+          image: ingress
+          imagePullPolicy: IfNotPresent
+          command:
+            - /ingress
+          args:
+            - --gateway-name=ingress
+            - --gateway-namespace=ingress-dev
+            - --listener-name=tls
+          ports:
+            - containerPort: 443
+              name: tls

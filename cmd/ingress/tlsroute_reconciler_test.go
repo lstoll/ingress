@@ -56,7 +56,8 @@ func TestTLSRouteReconcile(t *testing.T) {
 		listenerName:     "tls",
 	}
 
-	mgr, err := newMgr(cfg, r)
+	svcNamespace := "default"
+	mgr, err := newMgr(cfg, svcNamespace, r)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +70,6 @@ func TestTLSRouteReconcile(t *testing.T) {
 	}()
 
 	svcName := "backend-svc"
-	svcNamespace := "default"
 	portNumber := int32(1234)
 
 	// Create Backend Service

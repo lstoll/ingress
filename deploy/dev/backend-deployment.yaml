@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: demo-backend
+  template:
+    metadata:
+      labels:
+        app: demo-backend
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+          ports:
+            - containerPort: 8443
+              name: https
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/conf.d
+            - name: backend-tls
+              mountPath: /etc/nginx/tls
+              readOnly: true
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: demo-backend-nginx
+        - name: backend-tls
+          secret:
+            secretName: demo-backend-tls

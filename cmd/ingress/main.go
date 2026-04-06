@@ -14,6 +14,7 @@ import (
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -47,6 +48,7 @@ func main() {
 		gatewayName      = fs.String("gateway-name", "", "Gateway name to configure this ingress instance from")
 		gatewayNamespace = fs.String("gateway-namespace", defaultNamespace(), "Gateway namespace")
 		listenerName     = fs.String("listener-name", "", "Optional Gateway listener name to scope routing and listen address selection")
+		watchNamespace   = fs.String("watch-namespace", "", "Optional namespace to watch routes/services in. Empty means all namespaces")
 	)
 
 	fs.Parse(os.Args[1:])
@@ -74,7 +76,7 @@ func main() {
 		routes: map[string]route{},
 	}
 
-	mgr, err := newMgr(cfg, &TLSRouteReconciler{
+	mgr, err := newMgr(cfg, *watchNamespace, &TLSRouteReconciler{
 		logger:           logf.Log,
 		rdb:              rdb,
 		gatewayName:      *gatewayName,
@@ -103,11 +105,17 @@ func main() {
 	}
 
 	p := &tcpproxy.Proxy{}
+	proxyContext, proxyCancel := context.WithCancel(ctx)
 	g.Add(func() error {
 
 		p.AddSNIMatchRoute(resolvedListenAddr, MatchAny, d)
-		return p.Start()
+		if err := p.Start(); err != nil {
+			return err
+		}
+		<-proxyContext.Done()
+		return nil
 	}, func(error) {
+		proxyCancel()
 		_ = p.Close()
 	})
 
@@ -154,10 +162,19 @@ func resolveListenAddr(ctx context.Context, cfg *rest.Config, gatewayNN types.Na
 	return "", fmt.Errorf("gateway %s has no TLS listener named %q", gatewayNN, listenerName)
 }
 
-func newMgr(cfg *rest.Config, reconciler *TLSRouteReconciler) (manager.Manager, error) {
-	mgr, err := manager.New(cfg, manager.Options{
+func newMgr(cfg *rest.Config, watchNamespace string, reconciler *TLSRouteReconciler) (manager.Manager, error) {
+	opts := manager.Options{
 		Scheme: scheme,
-	})
+	}
+	if watchNamespace != "" {
+		opts.Cache = cache.Options{
+			DefaultNamespaces: map[string]cache.Config{
+				watchNamespace: {},
+			},
+		}
+	}
+
+	mgr, err := manager.New(cfg, opts)
 	if err != nil {
 		return nil, err
 	}
