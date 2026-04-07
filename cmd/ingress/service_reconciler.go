@@ -36,7 +36,8 @@ const (
 type ServiceReconciler struct {
 	Client client.Client
 	logger *slog.Logger
-	rdb    *routedb
+	// router holds the TLS SNI index and per-Service workload bindings.
+	router *ingressRouter
 
 	instance string
 }
@@ -48,7 +49,7 @@ func (s *ServiceReconciler) Reconcile(ctx context.Context, req reconcile.Request
 	if err := s.Client.Get(ctx, req.NamespacedName, &svc); err != nil {
 		if apierrors.IsNotFound(err) {
 			s.logger.Debug("service not found; removing routes", "name", req.Name, "namespace", req.Namespace)
-			s.rdb.RemoveRoute(req.NamespacedName)
+			s.router.RemoveRoute(req.NamespacedName)
 			return reconcile.Result{}, nil
 		}
 		return reconcile.Result{}, fmt.Errorf("getting service: %w", err)
@@ -57,14 +58,14 @@ func (s *ServiceReconciler) Reconcile(ctx context.Context, req reconcile.Request
 	if !s.managesService(&svc) {
 		s.logger.Debug("service does not match instance; removing routes",
 			"name", req.Name, "namespace", req.Namespace, "instance", s.instance)
-		s.rdb.RemoveRoute(req.NamespacedName)
+		s.router.RemoveRoute(req.NamespacedName)
 		return reconcile.Result{}, nil
 	}
 
 	mode := svc.Annotations[annMode]
 	if mode != modeTLSPassthrough && mode != modeTLSTermination && mode != modeHTTPS {
 		s.logger.Debug("unsupported service mode; removing routes", "mode", mode, "name", req.Name, "namespace", req.Namespace)
-		s.rdb.RemoveRoute(req.NamespacedName)
+		s.router.RemoveRoute(req.NamespacedName)
 		return reconcile.Result{}, nil
 	}
 
@@ -75,13 +76,13 @@ func (s *ServiceReconciler) Reconcile(ctx context.Context, req reconcile.Request
 	hostnames := splitCSV(svc.Annotations[hostnamesAnn])
 	if len(hostnames) == 0 {
 		s.logger.Debug("service has no hostnames; removing routes", "annotation", hostnamesAnn, "name", req.Name, "namespace", req.Namespace)
-		s.rdb.RemoveRoute(req.NamespacedName)
+		s.router.RemoveRoute(req.NamespacedName)
 		return reconcile.Result{}, nil
 	}
 
 	if svc.Spec.ClusterIP == "" || svc.Spec.ClusterIP == corev1.ClusterIPNone || len(svc.Spec.Ports) == 0 {
 		s.logger.Debug("service has no routable cluster ip/ports; removing routes", "name", req.Name, "namespace", req.Namespace)
-		s.rdb.RemoveRoute(req.NamespacedName)
+		s.router.RemoveRoute(req.NamespacedName)
 		return reconcile.Result{}, nil
 	}
 
@@ -93,14 +94,14 @@ func (s *ServiceReconciler) Reconcile(ctx context.Context, req reconcile.Request
 		if !strings.EqualFold(svc.Annotations[annOIDCDynamicClient], "true") {
 			s.logger.Info("ignoring service: oidc auth requires dynamic client registration",
 				"name", req.Name, "namespace", req.Namespace)
-			s.rdb.RemoveRoute(req.NamespacedName)
+			s.router.RemoveRoute(req.NamespacedName)
 			return reconcile.Result{}, nil
 		}
 		issuer := strings.TrimSpace(svc.Annotations[annOIDCIssuer])
 		if issuer == "" {
 			s.logger.Info("ignoring service: missing oidc issuer for auth mode OIDC",
 				"name", req.Name, "namespace", req.Namespace)
-			s.rdb.RemoveRoute(req.NamespacedName)
+			s.router.RemoveRoute(req.NamespacedName)
 			return reconcile.Result{}, nil
 		}
 		oidcCfg = &oidcConfig{
@@ -111,7 +112,7 @@ func (s *ServiceReconciler) Reconcile(ctx context.Context, req reconcile.Request
 		}
 	}
 
-	if err := s.rdb.SetRoute(req.NamespacedName, hostnames, targetAddr, mode, proxyProto, oidcCfg); err != nil {
+	if err := s.router.SetRoute(req.NamespacedName, hostnames, targetAddr, mode, proxyProto, oidcCfg); err != nil {
 		return reconcile.Result{}, err
 	}
 	s.logger.Info("configured service route",

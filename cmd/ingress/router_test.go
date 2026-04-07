@@ -7,7 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"errors"
+	"fmt"
 	"io"
 	"log"
 	"log/slog"
@@ -19,27 +19,33 @@ import (
 	"time"
 
 	"inet.af/tcpproxy"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 type connCtxKey struct{}
 
-type mockProxySource struct {
-	routes map[string]route
-}
-
-func (m *mockProxySource) RouteFor(hostName string) (route, bool) {
-	rt, ok := m.routes[hostName]
-	return rt, ok
-}
-
-func (m *mockProxySource) DialProxyFor(hostName string) (*tcpproxy.DialProxy, error) {
-	if rt, ok := m.routes[hostName]; ok {
-		return rt.Proxy, nil
+// One Kubernetes Service per hostname: each passthrough backend is its own binding.
+func testIngressRouterPassthrough(hostToAddr map[string]string) *ingressRouter {
+	ir := newIngressRouter(testLogger(), context.Background(), nil)
+	ir.mu.Lock()
+	defer ir.mu.Unlock()
+	n := 0
+	for host, addr := range hostToAddr {
+		n++
+		owner := types.NamespacedName{Namespace: "test", Name: fmt.Sprintf("svc%d", n)}
+		ir.tlsHostnameToService[host] = owner
+		ir.serviceBindings[owner] = &serviceBinding{
+			serviceRef:  owner,
+			mode:        modeTLSPassthrough,
+			targetAddr:  addr,
+			hostnames:   []string{host},
+			passthrough: &tcpproxy.DialProxy{Addr: addr},
+		}
 	}
-	return nil, nil
+	return ir
 }
 
-func TestDirector(t *testing.T) {
+func TestIngressRouter_PassthroughSNI(t *testing.T) {
 	host1server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("host-1"))
 	}))
@@ -62,17 +68,11 @@ func TestDirector(t *testing.T) {
 
 	host2server.StartTLS()
 
-	d := &director{
-		logger: testLogger(),
-		ps: &mockProxySource{
-			routes: map[string]route{
-				"host-1": {TargetAddr: host1server.Listener.Addr().String(), Proxy: &tcpproxy.DialProxy{Addr: host1server.Listener.Addr().String()}},
-				"host-2": {TargetAddr: host2server.Listener.Addr().String(), Proxy: &tcpproxy.DialProxy{Addr: host2server.Listener.Addr().String()}},
-			},
-		},
-	}
+	ir := testIngressRouterPassthrough(map[string]string{
+		"host-1": host1server.Listener.Addr().String(),
+		"host-2": host2server.Listener.Addr().String(),
+	})
 
-	// alloc an unused port for the proxy
 	tl, err := net.Listen("tcp", "localhost:0")
 	if err != nil {
 		t.Fatal(err)
@@ -86,7 +86,7 @@ func TestDirector(t *testing.T) {
 	proxyAddr := net.JoinHostPort("localhost", lp)
 
 	p := &tcpproxy.Proxy{}
-	p.AddSNIMatchRoute(proxyAddr, MatchAny, d)
+	p.AddSNIMatchRoute(proxyAddr, ir.matchSNI, ir)
 	if err := p.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -172,8 +172,8 @@ func TestDirector(t *testing.T) {
 		}
 		t.Logf("requesting %s", h3req.URL.String())
 		_, err = host3client.Do(h3req)
-		if !errors.Is(err, io.EOF) {
-			t.Errorf("wanted %v error for bad hostname, got: %v", io.EOF, err)
+		if err == nil {
+			t.Fatal("expected error for unknown SNI (tcpproxy closes before handshake completes)")
 		}
 	}
 
@@ -181,7 +181,52 @@ func TestDirector(t *testing.T) {
 	host2server.Close()
 }
 
-func TestDirectorTLSTerminate(t *testing.T) {
+func TestIngressRouter_HTTPSSNIMustMatchHost(t *testing.T) {
+	owner := types.NamespacedName{Namespace: "default", Name: "web"}
+	ir := newIngressRouter(testLogger(), context.Background(), nil)
+	ir.mu.Lock()
+	ir.tlsHostnameToService["a.example.test"] = owner
+	ir.serviceBindings[owner] = &serviceBinding{
+		serviceRef: owner,
+		mode:       modeHTTPS,
+		targetAddr: "127.0.0.1:9",
+		hostnames:  []string{"a.example.test"},
+		httpsHosts: map[string]httpsHostBinding{
+			"a.example.test": {
+				handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusTeapot)
+				}),
+			},
+		},
+	}
+	ir.mu.Unlock()
+
+	h := ir.serveHTTPForOwner(owner)
+
+	t.Run("mismatch_421", func(t *testing.T) {
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "https://b.example.test/", nil)
+		req.Host = "b.example.test"
+		req.TLS = &tls.ConnectionState{ServerName: "a.example.test"}
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusMisdirectedRequest {
+			t.Fatalf("code %d, body %q", rr.Code, rr.Body.String())
+		}
+	})
+
+	t.Run("match_proxies", func(t *testing.T) {
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "https://a.example.test/", nil)
+		req.Host = "a.example.test"
+		req.TLS = &tls.ConnectionState{ServerName: "a.example.test"}
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusTeapot {
+			t.Fatalf("expected backend handler, got %d", rr.Code)
+		}
+	})
+}
+
+func TestIngressRouter_TLSTermination(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("terminated"))
 	}))
@@ -189,23 +234,24 @@ func TestDirectorTLSTerminate(t *testing.T) {
 
 	addr := backend.Listener.Addr().String()
 
-	cp, err := newCertProvider(certModeSelfSigned, certProviderConfig{})
+	cp, err := newCertProvider(certModeSelfSigned, certProviderConfig{
+		AllowHost: func(host string) bool { return host == "app.localtest.me" },
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	d := &director{
-		logger: testLogger(),
-		cp:     cp,
-		ps: &mockProxySource{
-			routes: map[string]route{
-				"app.localtest.me": {
-					TargetAddr: addr,
-					Mode:       modeTLSTermination,
-				},
-			},
-		},
+	owner := types.NamespacedName{Namespace: "default", Name: "term"}
+	ir := newIngressRouter(testLogger(), context.Background(), cp)
+	ir.mu.Lock()
+	ir.tlsHostnameToService["app.localtest.me"] = owner
+	ir.serviceBindings[owner] = &serviceBinding{
+		serviceRef: owner,
+		mode:       modeTLSTermination,
+		targetAddr: addr,
+		hostnames:  []string{"app.localtest.me"},
 	}
+	ir.mu.Unlock()
 
 	tl, err := net.Listen("tcp", "localhost:0")
 	if err != nil {
@@ -219,7 +265,7 @@ func TestDirectorTLSTerminate(t *testing.T) {
 
 	proxyAddr := net.JoinHostPort("localhost", lp)
 	p := &tcpproxy.Proxy{}
-	p.AddSNIMatchRoute(proxyAddr, MatchAny, d)
+	p.AddSNIMatchRoute(proxyAddr, ir.matchSNI, ir)
 	if err := p.Start(); err != nil {
 		t.Fatal(err)
 	}

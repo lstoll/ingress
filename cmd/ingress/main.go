@@ -85,19 +85,18 @@ func main() {
 
 	cfg := config.GetConfigOrDie()
 
-	rdb := &routedb{
-		logger: log,
-		ctx:    ctx,
-		routes: map[string]route{},
-	}
+	var ir *ingressRouter
 	cp, err := newCertProvider(*certMode, certProviderConfig{
 		KubeConfig:     cfg,
 		AutocertSecret: *autocertSecret,
 		HostPolicy: func(_ context.Context, host string) error {
-			if rdb.HasHost(host) {
+			if ir != nil && ir.HasHost(host) {
 				return nil
 			}
 			return fmt.Errorf("host %q is not configured by any attached route", host)
+		},
+		AllowHost: func(host string) bool {
+			return ir != nil && ir.HasHost(host)
 		},
 	})
 	if err != nil {
@@ -106,9 +105,12 @@ func main() {
 	}
 	log.Info("certificate provider initialized")
 
+	// TLS front: SNI index + per-Service bindings (see router.go model).
+	ir = newIngressRouter(log.With("component", "ingress-router"), ctx, cp)
+
 	mgr, err := newMgr(cfg, *watchNamespace, &ServiceReconciler{
 		logger:   log.With("component", "service-reconciler"),
-		rdb:      rdb,
+		router:   ir,
 		instance: *instance,
 	})
 	if err != nil {
@@ -127,12 +129,6 @@ func main() {
 		mgrCancel()
 	})
 
-	d := &director{
-		logger: log.With("component", "director"),
-		ps:     rdb,
-		cp:     cp,
-	}
-
 	p := &tcpproxy.Proxy{}
 	if *listenProxyProto {
 		p.ListenFunc = func(network, laddr string) (net.Listener, error) {
@@ -142,7 +138,7 @@ func main() {
 	proxyContext, proxyCancel := context.WithCancel(ctx)
 	g.Add(func() error {
 		log.Info("starting TLS proxy listener", "addr", *tlsListen)
-		p.AddSNIMatchRoute(*tlsListen, MatchAny, d)
+		p.AddSNIMatchRoute(*tlsListen, ir.matchSNI, ir)
 		if err := p.Start(); err != nil {
 			return err
 		}
@@ -150,13 +146,14 @@ func main() {
 		return nil
 	}, func(error) {
 		proxyCancel()
+		_ = ir.Close()
 		_ = p.Close()
 	})
 
 	if *httpListen != "" {
 		hs := &http.Server{
 			Addr:    *httpListen,
-			Handler: httpsRedirectHandler(rdb, *httpsRedirectPort, log),
+			Handler: httpsRedirectHandler(ir, *httpsRedirectPort, log),
 		}
 		g.Add(func() error {
 			log.Info("starting HTTP redirect listener", "addr", *httpListen)
@@ -175,13 +172,17 @@ func main() {
 	}
 }
 
-func httpsRedirectHandler(rdb *routedb, httpsRedirectPort string, log *slog.Logger) http.Handler {
+type hostIndex interface {
+	HasHost(host string) bool
+}
+
+func httpsRedirectHandler(hi hostIndex, httpsRedirectPort string, log *slog.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host := r.Host
 		if h, _, err := net.SplitHostPort(r.Host); err == nil {
 			host = h
 		}
-		if !rdb.HasHost(host) {
+		if !hi.HasHost(host) {
 			log.Debug("http redirect miss", "host", host, "path", r.URL.Path)
 			http.NotFound(w, r)
 			return

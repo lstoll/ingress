@@ -23,8 +23,8 @@ import (
 	"inet.af/tcpproxy"
 )
 
-// E2E-style tests: fake Kubernetes client → ServiceReconciler → routedb → tcpproxy +
-// director (+ optional HTTP→HTTPS redirect listener). Backends are real listeners
+// E2E-style tests: fake client → ServiceReconciler → ingressRouter (SNI index + bindings) → tcpproxy
+// (+ optional HTTP→HTTPS redirect listener). Backends are real listeners
 // (httptest or tls.Listen) on loopback; Service ClusterIP is 127.0.0.1 with the
 // backend’s port. SNI / Host use *.localtest.me hostnames (they need not resolve:
 // clients dial 127.0.0.1 with TLS ServerName set).
@@ -34,13 +34,13 @@ const e2EInstance = "e2e-ingress"
 const e2ELoopbackClusterIP = "127.0.0.1"
 
 type e2eStack struct {
-	t     *testing.T
-	ctx   context.Context
-	stop  context.CancelFunc
-	rdb   *routedb
-	k8s   client.Client
-	rec   *ServiceReconciler
-	proxy *tcpproxy.Proxy
+	t      *testing.T
+	ctx    context.Context
+	stop   context.CancelFunc
+	router *ingressRouter
+	k8s    client.Client
+	rec    *ServiceReconciler
+	proxy  *tcpproxy.Proxy
 
 	proxyAddr       string
 	tlsListenerPort string
@@ -52,20 +52,18 @@ type e2eStack struct {
 func newE2EStack(t *testing.T, opts e2eStackOptions) *e2eStack {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	rdb := &routedb{
-		logger: testLogger(),
-		ctx:    ctx,
-		routes: make(map[string]route),
-	}
-	if opts.authMiddlewareBuilder != nil {
-		rdb.authMiddlewareBuilder = opts.authMiddlewareBuilder
-	}
 
-	cp, err := newCertProvider(certModeSelfSigned, certProviderConfig{})
+	var ir *ingressRouter
+	cp, err := newCertProvider(certModeSelfSigned, certProviderConfig{
+		AllowHost: func(host string) bool { return ir != nil && ir.HasHost(host) },
+	})
 	if err != nil {
 		t.Fatalf("cert provider: %v", err)
 	}
-	d := &director{logger: testLogger(), ps: rdb, cp: cp}
+	ir = newIngressRouter(testLogger(), ctx, cp)
+	if opts.authMiddlewareBuilder != nil {
+		ir.authMiddlewareBuilder = opts.authMiddlewareBuilder
+	}
 
 	tl, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -79,7 +77,7 @@ func newE2EStack(t *testing.T, opts e2eStackOptions) *e2eStack {
 	proxyAddr := net.JoinHostPort("127.0.0.1", tlsPort)
 
 	p := &tcpproxy.Proxy{}
-	p.AddSNIMatchRoute(proxyAddr, MatchAny, d)
+	p.AddSNIMatchRoute(proxyAddr, ir.matchSNI, ir)
 	if err := p.Start(); err != nil {
 		t.Fatalf("proxy start: %v", err)
 	}
@@ -88,7 +86,7 @@ func newE2EStack(t *testing.T, opts e2eStackOptions) *e2eStack {
 	rec := &ServiceReconciler{
 		Client:   k8s,
 		logger:   testLogger(),
-		rdb:      rdb,
+		router:   ir,
 		instance: e2EInstance,
 	}
 
@@ -96,7 +94,7 @@ func newE2EStack(t *testing.T, opts e2eStackOptions) *e2eStack {
 		t:               t,
 		ctx:             ctx,
 		stop:            cancel,
-		rdb:             rdb,
+		router:          ir,
 		k8s:             k8s,
 		rec:             rec,
 		proxy:           p,
@@ -111,7 +109,7 @@ func newE2EStack(t *testing.T, opts e2eStackOptions) *e2eStack {
 		}
 		h.redirectLn = rl
 		h.redirectSrv = &http.Server{
-			Handler:      httpsRedirectHandler(rdb, tlsPort, testLogger()),
+			Handler:      httpsRedirectHandler(ir, tlsPort, testLogger()),
 			ReadTimeout:  10 * time.Second,
 			WriteTimeout: 10 * time.Second,
 		}
@@ -123,6 +121,7 @@ func newE2EStack(t *testing.T, opts e2eStackOptions) *e2eStack {
 		if h.redirectSrv != nil {
 			_ = h.redirectSrv.Close()
 		}
+		_ = ir.Close()
 		_ = p.Close()
 	})
 
@@ -220,8 +219,8 @@ func tlsClientHTTP2(host string) *http.Client {
 	}
 }
 
-// e2eFrontTLSRow is one cell in the front-TLS routing matrix: reconciler + routedb
-// + tcpproxy + director, one route, then an HTTP client through the ingress TLS listener.
+// e2eFrontTLSRow is one cell in the front-TLS routing matrix: reconciler + ingressRouter
+// + tcpproxy, one route, then an HTTP client through the ingress TLS listener.
 type e2eFrontTLSRow struct {
 	name       string
 	mode       string
@@ -590,7 +589,7 @@ func TestE2E_AuthMiddleware_Stub(t *testing.T) {
 }
 
 // TestE2E_FullOIDC_Middleware documents the gap: real OIDC uses discovery,
-// dynamic registration, and the oauth2ext middleware. Replace the routedb stub
+// dynamic registration, and the oauth2ext middleware. Replace the authMiddlewareBuilder stub
 // with nil and stand up a fake issuer or use integration fixtures.
 func TestE2E_FullOIDC_Middleware(t *testing.T) {
 	t.Skip("full OIDC stack: requires issuer + registration; use authMiddlewareBuilder stub for routing tests until then")

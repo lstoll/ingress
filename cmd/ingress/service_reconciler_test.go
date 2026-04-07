@@ -2,25 +2,21 @@ package main
 
 import (
 	"context"
-	"testing"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"testing"
 )
 
 func TestServiceReconcile(t *testing.T) {
 	ctx := context.Background()
 
-	rdb := &routedb{
-		logger: testLogger(),
-		routes: map[string]route{},
-	}
-
+	router := newIngressRouter(testLogger(), ctx, nil)
 	r := &ServiceReconciler{
 		logger:   testLogger(),
-		rdb:      rdb,
+		router:   router,
 		instance: "ingress1",
 	}
 
@@ -55,7 +51,7 @@ func TestServiceReconcile(t *testing.T) {
 				labelIngressInstance: "ingress1",
 			},
 			Annotations: map[string]string{
-				annMode:         modeHTTPS,
+				annMode:          modeHTTPS,
 				annHTTPHostnames: "bar.example.com",
 			},
 		},
@@ -75,7 +71,7 @@ func TestServiceReconcile(t *testing.T) {
 		t.Fatalf("reconcile term service: %v", err)
 	}
 
-	gotPass, ok := rdb.RouteFor("foo.example.com")
+	gotPass, ok := router.RouteFor("foo.example.com")
 	if !ok {
 		t.Fatalf("expected foo.example.com route")
 	}
@@ -92,7 +88,7 @@ func TestServiceReconcile(t *testing.T) {
 		t.Fatalf("expected pass proxy with proxy protocol v1")
 	}
 
-	gotTerm, ok := rdb.RouteFor("bar.example.com")
+	gotTerm, ok := router.RouteFor("bar.example.com")
 	if !ok {
 		t.Fatalf("expected bar.example.com route")
 	}
@@ -115,13 +111,10 @@ func TestServiceReconcile(t *testing.T) {
 
 func TestServiceReconcileRemovesRouteForWrongInstance(t *testing.T) {
 	ctx := context.Background()
-	rdb := &routedb{
-		logger: testLogger(),
-		routes: map[string]route{},
-	}
+	router := newIngressRouter(testLogger(), context.Background(), nil)
 	r := &ServiceReconciler{
 		logger:   testLogger(),
-		rdb:      rdb,
+		router:   router,
 		instance: "ingress1",
 	}
 
@@ -149,21 +142,17 @@ func TestServiceReconcileRemovesRouteForWrongInstance(t *testing.T) {
 	if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "backend"}}); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	if _, ok := rdb.RouteFor("ignored.example.com"); ok {
+	if _, ok := router.RouteFor("ignored.example.com"); ok {
 		t.Fatalf("did not expect route for non-matching instance")
 	}
 }
 
 func TestServiceReconcileOIDCConfigValidation(t *testing.T) {
 	ctx := context.Background()
-	rdb := &routedb{
-		logger: testLogger(),
-		ctx:    ctx,
-		routes: map[string]route{},
-	}
+	router := newIngressRouter(testLogger(), ctx, nil)
 	r := &ServiceReconciler{
 		logger:   testLogger(),
-		rdb:      rdb,
+		router:   router,
 		instance: "ingress1",
 	}
 
@@ -195,7 +184,7 @@ func TestServiceReconcileOIDCConfigValidation(t *testing.T) {
 	if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: svc.Name}}); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	if _, ok := rdb.RouteFor("auth.example.com"); ok {
+	if _, ok := router.RouteFor("auth.example.com"); ok {
 		t.Fatalf("expected no route when oidc dynamic client is not true")
 	}
 }

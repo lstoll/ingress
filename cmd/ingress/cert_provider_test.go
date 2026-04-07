@@ -43,6 +43,19 @@ func TestSelfSignedCertProviderIncludesServerNameInSAN(t *testing.T) {
 	}
 }
 
+func TestSelfSignedCertProviderAllowHostRejectsUnknown(t *testing.T) {
+	p := &selfSignedCertProvider{
+		certs: map[string]*tls.Certificate{},
+		allowHost: func(host string) bool {
+			return host == "allowed.example"
+		},
+	}
+	_, err := p.TLSConfig().GetCertificate(&tls.ClientHelloInfo{ServerName: "other.example"})
+	if err == nil {
+		t.Fatal("expected error for disallowed host")
+	}
+}
+
 func TestSelfSignedCertProviderFallsBackToLocalhost(t *testing.T) {
 	p := &selfSignedCertProvider{
 		certs: map[string]*tls.Certificate{},

@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
@@ -35,18 +36,23 @@ type certProviderConfig struct {
 	KubeConfig     *rest.Config
 	AutocertSecret string
 	HostPolicy     autocert.HostPolicy
+	// AllowHost, when set for self-signed mode, rejects GetCertificate for
+	// hostnames that are not configured (defense in depth with SNI matching).
+	AllowHost func(host string) bool
 }
 
 type selfSignedCertProvider struct {
-	mu    sync.Mutex
-	certs map[string]*tls.Certificate
+	mu        sync.Mutex
+	certs     map[string]*tls.Certificate
+	allowHost func(host string) bool
 }
 
 func newCertProvider(mode string, cfg certProviderConfig) (CertProvider, error) {
 	switch mode {
 	case certModeSelfSigned:
 		return &selfSignedCertProvider{
-			certs: map[string]*tls.Certificate{},
+			certs:     map[string]*tls.Certificate{},
+			allowHost: cfg.AllowHost,
 		}, nil
 	case certModeAutocert:
 		return newAutocertProvider(cfg)
@@ -66,7 +72,11 @@ func (p *selfSignedCertProvider) TLSConfig() *tls.Config {
 func (p *selfSignedCertProvider) getCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	host := "localhost"
 	if hello != nil && hello.ServerName != "" {
-		host = hello.ServerName
+		host = strings.ToLower(strings.TrimSpace(hello.ServerName))
+	}
+
+	if p.allowHost != nil && !p.allowHost(host) {
+		return nil, errors.New("ingress: host not allowed for certificate")
 	}
 
 	p.mu.Lock()
