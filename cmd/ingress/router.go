@@ -299,7 +299,21 @@ func (r *ingressRouter) installBinding(owner types.NamespacedName, claimed []str
 		r.logger.Info("set route", "hostname", canon, "owner", owner.String(), "mode", binding.mode, "target", binding.targetAddr)
 	}
 	r.serviceBindings[owner] = binding
+
+	r.updateRouteGaugeLocked()
 	return nil
+}
+
+// updateRouteGauge recomputes the routes_configured gauge. Caller must hold r.mu.
+func (r *ingressRouter) updateRouteGaugeLocked() {
+	counts := map[string]float64{}
+	for _, b := range r.serviceBindings {
+		counts[b.mode] += float64(len(b.hostnames))
+	}
+	routesConfigured.Reset()
+	for mode, n := range counts {
+		routesConfigured.WithLabelValues(mode).Set(n)
+	}
 }
 
 func (r *ingressRouter) RemoveRoute(owner types.NamespacedName) {
@@ -313,6 +327,7 @@ func (r *ingressRouter) RemoveRoute(owner types.NamespacedName) {
 		}
 	}
 	delete(r.serviceBindings, owner)
+	r.updateRouteGaugeLocked()
 	r.mu.Unlock()
 
 	r.stopOwnerHTTPServer(owner)
@@ -403,8 +418,36 @@ func (r *ingressRouter) serveHTTPForOwner(owner types.NamespacedName) http.Handl
 			http.NotFound(w, req)
 			return
 		}
-		hdl.ServeHTTP(w, req)
+		start := time.Now()
+		sw := &statusWriter{ResponseWriter: w}
+		hdl.ServeHTTP(sw, req)
+		httpRequestDuration.WithLabelValues(key).Observe(time.Since(start).Seconds())
+		httpRequestsTotal.WithLabelValues(key, statusClass(sw.status)).Inc()
 	})
+}
+
+// statusWriter wraps http.ResponseWriter to capture the status code.
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusWriter) Write(b []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+// Unwrap lets http.ResponseController access the underlying ResponseWriter
+// (for Flush, Hijack, etc. needed by HTTP/2 and streaming).
+func (w *statusWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
 }
 
 func hostOnly(hostport string) string {
@@ -436,6 +479,10 @@ func (r *ingressRouter) HandleConn(c net.Conn) {
 		_ = c.Close()
 		return
 	}
+
+	connectionsTotal.WithLabelValues(b.mode).Inc()
+	connectionsActive.WithLabelValues(b.mode).Inc()
+	defer connectionsActive.WithLabelValues(b.mode).Dec()
 
 	switch b.mode {
 	case modeTLSTermination, modeHTTPS:
@@ -540,6 +587,7 @@ func (r *ingressRouter) handleTerminateRoute(c *tcpproxy.Conn, b *serviceBinding
 
 	tlsConn := tls.Server(c, r.cp.TLSConfig())
 	if err := tlsConn.Handshake(); err != nil {
+		tlsHandshakeErrors.Inc()
 		return err
 	}
 

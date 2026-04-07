@@ -113,8 +113,10 @@ func (s *ServiceReconciler) Reconcile(ctx context.Context, req reconcile.Request
 	}
 
 	if err := s.router.SetRoute(req.NamespacedName, hostnames, targetAddr, mode, proxyProto, oidcCfg); err != nil {
+		reconcileTotal.WithLabelValues("error").Inc()
 		return reconcile.Result{}, err
 	}
+	reconcileTotal.WithLabelValues("configured").Inc()
 	s.logger.Info("configured service route",
 		"name", req.Name,
 		"namespace", req.Namespace,

@@ -23,8 +23,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	k8sscheme "k8s.io/client-go/kubernetes/scheme"
 )
@@ -47,6 +49,8 @@ func main() {
 		watchNamespace          = fs.String("watch-namespace", "", "Optional namespace to watch services in. Empty means all namespaces")
 		certMode                = fs.String("cert-mode", certModeSelfSigned, "Certificate mode for terminated TLS routes: self-signed or autocert")
 		autocertSecret          = fs.String("autocert-secret", "", "namespace/name secret for autocert cache (required when --cert-mode=autocert)")
+		metricsListen           = fs.String("metrics-listen", ":9090", "Metrics server listen address (set to 0 to disable)")
+		healthListen            = fs.String("health-listen", ":8080", "Health probe listen address (set to 0 to disable)")
 		logLevel                = fs.String("log-level", envOrDefault("INGRESS_LOG_LEVEL", "info"), "Log level: debug, info, warn, error")
 		showVersion             = fs.Bool("version", false, "Print version and exit")
 	)
@@ -108,7 +112,11 @@ func main() {
 	// TLS front: SNI index + per-Service bindings (see router.go model).
 	ir = newIngressRouter(log.With("component", "ingress-router"), ctx, cp)
 
-	mgr, err := newMgr(cfg, *watchNamespace, &ServiceReconciler{
+	mgr, err := newMgr(cfg, mgrConfig{
+		watchNamespace: *watchNamespace,
+		metricsListen:  *metricsListen,
+		healthListen:   *healthListen,
+	}, &ServiceReconciler{
 		logger:   log.With("component", "service-reconciler"),
 		router:   ir,
 		instance: *instance,
@@ -294,14 +302,24 @@ func validateStartupConfig(instance, certMode, autocertSecret string) error {
 	}
 	return nil
 }
-func newMgr(cfg *rest.Config, watchNamespace string, reconciler *ServiceReconciler) (manager.Manager, error) {
+type mgrConfig struct {
+	watchNamespace string
+	metricsListen  string
+	healthListen   string
+}
+
+func newMgr(cfg *rest.Config, mc mgrConfig, reconciler *ServiceReconciler) (manager.Manager, error) {
 	opts := manager.Options{
 		Scheme: scheme,
+		Metrics: metricsserver.Options{
+			BindAddress: mc.metricsListen,
+		},
+		HealthProbeBindAddress: mc.healthListen,
 	}
-	if watchNamespace != "" {
+	if mc.watchNamespace != "" {
 		opts.Cache = cache.Options{
 			DefaultNamespaces: map[string]cache.Config{
-				watchNamespace: {},
+				mc.watchNamespace: {},
 			},
 		}
 	}
@@ -309,6 +327,13 @@ func newMgr(cfg *rest.Config, watchNamespace string, reconciler *ServiceReconcil
 	mgr, err := manager.New(cfg, opts)
 	if err != nil {
 		return nil, err
+	}
+
+	if err := mgr.AddHealthzCheck("ping", healthz.Ping); err != nil {
+		return nil, fmt.Errorf("adding healthz check: %w", err)
+	}
+	if err := mgr.AddReadyzCheck("ping", healthz.Ping); err != nil {
+		return nil, fmt.Errorf("adding readyz check: %w", err)
 	}
 
 	reconciler.Client = mgr.GetClient()
