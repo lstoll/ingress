@@ -83,7 +83,11 @@ func (p *selfSignedCertProvider) getCertificate(hello *tls.ClientHelloInfo) (*tl
 	defer p.mu.Unlock()
 
 	if cert, ok := p.certs[host]; ok {
-		return cert, nil
+		leaf, err := x509.ParseCertificate(cert.Certificate[0])
+		if err == nil && time.Now().Before(leaf.NotAfter.Add(-1*time.Hour)) {
+			return cert, nil
+		}
+		delete(p.certs, host)
 	}
 
 	cert, err := generateSelfSignedCert(host)

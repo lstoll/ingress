@@ -39,19 +39,27 @@ func (a *autocertCache) Get(ctx context.Context, key string) ([]byte, error) {
 		return nil, autocert.ErrCacheMiss
 	}
 
-	v, ok := sec.Data[secKeyEnc.EncodeToString([]byte(key))]
+	encoded := secKeyEnc.EncodeToString([]byte(key))
+	v, ok := sec.Data[encoded]
 	if !ok {
 		slog.Debug("autocert cache miss: key not found", "namespace", a.secretNamespace, "name", a.secretName, "key", key)
 		return nil, autocert.ErrCacheMiss
 	}
 
-	dec, err := base64.StdEncoding.DecodeString(string(v))
-	if err != nil {
-		slog.Error("autocert cache decode failed", "namespace", a.secretNamespace, "name", a.secretName, "key", key, "error", err)
-		return nil, fmt.Errorf("base64 decoding secret: %v", err)
+	// Migration: previous versions double-base64-encoded the data. Detect and
+	// fix in-place so we can remove this path once all secrets have been
+	// re-written by a Put call.
+	if dec, err := base64.StdEncoding.DecodeString(string(v)); err == nil {
+		slog.Info("autocert cache: migrating double-encoded value", "namespace", a.secretNamespace, "name", a.secretName, "key", key)
+		sec.Data[encoded] = dec
+		if _, updateErr := a.clientset.CoreV1().Secrets(a.secretNamespace).Update(ctx, sec, metav1.UpdateOptions{}); updateErr != nil {
+			slog.Warn("autocert cache: migration update failed, using decoded value", "key", key, "error", updateErr)
+		}
+		return dec, nil
 	}
+
 	slog.Debug("autocert cache hit", "namespace", a.secretNamespace, "name", a.secretName, "key", key)
-	return dec, nil
+	return v, nil
 }
 
 func (a *autocertCache) Put(ctx context.Context, key string, data []byte) error {
@@ -81,15 +89,15 @@ func (a *autocertCache) Put(ctx context.Context, key string, data []byte) error 
 
 		encoded := secKeyEnc.EncodeToString([]byte(key))
 		sec.Annotations[keyNameAnnotation+encoded] = key
-		sec.Data[encoded] = []byte(base64.StdEncoding.EncodeToString(data))
+		sec.Data[encoded] = data
 
 		if needsCreate {
-			if _, err := a.clientset.CoreV1().Secrets(a.secretNamespace).Create(context.TODO(), sec, metav1.CreateOptions{}); err != nil {
+			if _, err := a.clientset.CoreV1().Secrets(a.secretNamespace).Create(ctx, sec, metav1.CreateOptions{}); err != nil {
 				return err
 			}
 			slog.Info("autocert cache secret created", "namespace", a.secretNamespace, "name", a.secretName)
 		} else {
-			if _, err := a.clientset.CoreV1().Secrets(a.secretNamespace).Update(context.TODO(), sec, metav1.UpdateOptions{}); err != nil {
+			if _, err := a.clientset.CoreV1().Secrets(a.secretNamespace).Update(ctx, sec, metav1.UpdateOptions{}); err != nil {
 				return err
 			}
 			slog.Debug("autocert cache secret updated", "namespace", a.secretNamespace, "name", a.secretName)
@@ -122,7 +130,7 @@ func (a *autocertCache) Delete(ctx context.Context, key string) error {
 		delete(sec.Data, encoded)
 		delete(sec.Annotations, keyNameAnnotation+encoded)
 
-		if _, err := a.clientset.CoreV1().Secrets(a.secretNamespace).Update(context.TODO(), sec, metav1.UpdateOptions{}); err != nil {
+		if _, err := a.clientset.CoreV1().Secrets(a.secretNamespace).Update(ctx, sec, metav1.UpdateOptions{}); err != nil {
 			return err
 		}
 		slog.Debug("autocert cache secret updated", "namespace", a.secretNamespace, "name", a.secretName)

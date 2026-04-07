@@ -28,7 +28,6 @@ type oidcConfig struct {
 }
 
 func buildMiddlewareForHost(ctx context.Context, incomingHostname string, cfg oidcConfig) (func(http.Handler) http.Handler, error) {
-	// TODO - do this per-request or something withe the inbound hostname? allowlist them though!
 	redirectURL := "https://" + incomingHostname + "/.ingress/oidc-callback"
 
 	var (
@@ -40,46 +39,24 @@ func buildMiddlewareForHost(ctx context.Context, incomingHostname string, cfg oi
 	withInboundHeaderStrip := func(h http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if cfg.UsernameHeader != "" {
-				if v := r.Header.Get(cfg.UsernameHeader); v != "" {
-					slog.Debug("oidc: stripping inbound username header before auth",
-						"hostname", incomingHostname, "header", cfg.UsernameHeader, "inbound_value", v)
-				}
 				r.Header.Del(cfg.UsernameHeader)
 			}
 			if cfg.EmailHeader != "" {
-				if v := r.Header.Get(cfg.EmailHeader); v != "" {
-					slog.Debug("oidc: stripping inbound email header before auth",
-						"hostname", incomingHostname, "header", cfg.EmailHeader, "inbound_value", v)
-				}
 				r.Header.Del(cfg.EmailHeader)
 			}
 			h.ServeHTTP(w, r)
 		})
 	}
 
-	refreshMw := func() error {
-		refreshMu.Lock()
-		defer refreshMu.Unlock()
-		if time.Since(lastRefreshed) < middlewareRefreshInterval {
-			return nil
-		}
-		slog.Info("oidc: refreshing middleware", "hostname", incomingHostname, "issuer", cfg.Issuer)
-		clientID, clientSecret, err := oidcClientCredentials(ctx, cfg, incomingHostname, redirectURL)
-		if err != nil {
-			return err
-		}
+	buildMw := func(clientID, clientSecret string) (func(http.Handler) http.Handler, error) {
 		omw, err := middleware.NewIDSSOHandlerFromDiscovery(ctx, nil, cfg.Issuer, clientID, clientSecret, redirectURL)
 		if err != nil {
-			return fmt.Errorf("oidc: from discovery: %w", err)
+			return nil, fmt.Errorf("oidc: from discovery: %w", err)
 		}
-
-		lastRefreshed = time.Now()
-		currentMw = func(h http.Handler) http.Handler {
+		return func(h http.Handler) http.Handler {
 			return omw.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				cl, ok := omw.IDClaimsFromContext(r.Context())
 				if !ok {
-					slog.Debug("oidc: no verified ID claims in context; cannot set auth headers",
-						"hostname", incomingHostname, "method", r.Method, "path", r.URL.Path)
 					http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 					return
 				}
@@ -90,58 +67,52 @@ func buildMiddlewareForHost(ctx context.Context, incomingHostname string, cfg oi
 					return
 				}
 
-				cljson, err := cl.JSONPayload()
-				if err != nil {
-					slog.Error("oidc: failed to get JSON payload from claims", "hostname", incomingHostname, "error", err)
-					http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-					return
-				}
-				slog.Debug("oidc: claims JSON payload", "hostname", incomingHostname, "payload", string(cljson))
-
 				if cfg.UsernameHeader != "" {
-					username, err := cl.PreferredUsername()
-					switch {
-					case err != nil:
-						slog.Debug("oidc: preferred_username claim not usable; username header not set",
-							"hostname", incomingHostname, "header", cfg.UsernameHeader, "error", err)
-					case username == "":
-						slog.Debug("oidc: preferred_username claim empty; username header not set",
-							"hostname", incomingHostname, "header", cfg.UsernameHeader, "preferred_username", "")
-					default:
+					if username, err := cl.PreferredUsername(); err == nil && username != "" {
 						r.Header.Set(cfg.UsernameHeader, username)
-						slog.Debug("oidc: set username header from preferred_username claim",
-							"hostname", incomingHostname, "header", cfg.UsernameHeader, "preferred_username", username)
 					}
 				}
 				if cfg.EmailHeader != "" {
-					email, err := cl.Email()
-					switch {
-					case err != nil:
-						slog.Debug("oidc: email claim not usable; email header not set",
-							"hostname", incomingHostname, "header", cfg.EmailHeader, "error", err)
-					case email == "":
-						slog.Debug("oidc: email claim empty; email header not set",
-							"hostname", incomingHostname, "header", cfg.EmailHeader, "email", "")
-					default:
+					if email, err := cl.Email(); err == nil && email != "" {
 						r.Header.Set(cfg.EmailHeader, email)
-						slog.Debug("oidc: set email header from email claim",
-							"hostname", incomingHostname, "header", cfg.EmailHeader, "email", email)
 					}
 				}
 
 				h.ServeHTTP(w, r)
 			}))
+		}, nil
+	}
+
+	refreshMw := func() error {
+		refreshMu.Lock()
+		defer refreshMu.Unlock()
+		if time.Since(lastRefreshed) < middlewareRefreshInterval {
+			return nil
+		}
+		slog.Info("oidc: refreshing middleware", "hostname", incomingHostname, "issuer", cfg.Issuer)
+
+		// Always re-register: middleware construction doesn't validate
+		// credentials (they're only used at token exchange time), so we
+		// can't detect stale creds by retrying the build.
+		clientID, clientSecret, err := oidcClientCredentials(ctx, cfg, incomingHostname, redirectURL)
+		if err != nil {
+			return err
 		}
 
+		mw, err := buildMw(clientID, clientSecret)
+		if err != nil {
+			return err
+		}
+
+		lastRefreshed = time.Now()
+		currentMw = mw
 		return nil
 	}
 
-	// Prime middleware so we never serve with nil currentMw.
 	if err := refreshMw(); err != nil {
 		return nil, fmt.Errorf("oidc: initial middleware refresh: %w", err)
 	}
 
-	// Refresh middleware periodically (provider discovery, registration if used, then new handler).
 	go func() {
 		ticker := time.NewTicker(middlewareRefreshInterval)
 		defer ticker.Stop()
@@ -163,7 +134,6 @@ func buildMiddlewareForHost(ctx context.Context, incomingHostname string, cfg oi
 			mw := currentMw
 			refreshMu.RUnlock()
 			if mw == nil {
-				// Fallback: e.g. initial refresh failed after we started serving.
 				if err := refreshMw(); err != nil {
 					slog.Error("oidc: failed to refresh middleware", "error", err)
 					http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)

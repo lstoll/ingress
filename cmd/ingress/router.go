@@ -1,15 +1,20 @@
 // TLS front router: two data structures, one mutex.
 //
-// Layer 1 — tlsHostnameToService: “this TLS SNI (canonical hostname) is claimed
-// by which Kubernetes Service?” Used for tcpproxy matching, cert allowlists,
+// Layer 1 — tlsHostnameToService: "this TLS SNI (canonical hostname) is claimed
+// by which Kubernetes Service?" Used for tcpproxy matching, cert allowlists,
 // and HTTP→HTTPS redirects. No handlers or upstream addresses.
 //
-// Layer 2 — serviceBindings: “for this Service (NamespacedName), what is the
-// workload?” (mode, ClusterIP:port, passthrough dial proxy, per-host HTTPS
+// Layer 2 — serviceBindings: "for this Service (NamespacedName), what is the
+// workload?" (mode, ClusterIP:port, passthrough dial proxy, per-host HTTPS
 // stacks). Every byte after SNI resolution is handled only via the binding for
 // the Service that owns that SNI.
 //
 // HTTPS: one http.Server per Service, channel-fed; Host must match SNI (421).
+//
+// Mutex ordering (no nesting; always acquired/released sequentially):
+//   mu        — protects layer 1 + layer 2 maps (RWMutex, short hold)
+//   ownerMu   — protects ownerCancel map
+//   httpsMu   — protects httpsByOwner map + HTTP server lifecycle
 
 package main
 
@@ -72,7 +77,7 @@ type ingressRouter struct {
 
 	authMiddlewareBuilder func(ctx context.Context, host string, cfg oidcConfig) (func(http.Handler) http.Handler, error)
 
-	mu sync.RWMutex
+	mu sync.RWMutex // see mutex ordering comment at top of file
 
 	// Layer 1 — SNI / redirect / cert policy: canonical hostname → owning Service.
 	tlsHostnameToService map[string]types.NamespacedName
@@ -81,11 +86,16 @@ type ingressRouter struct {
 
 	cp CertProvider
 
-	ownerMu     sync.Mutex
+	ownerMu     sync.Mutex // see mutex ordering comment at top of file
 	ownerCancel map[types.NamespacedName]context.CancelFunc
 
-	httpsMu      sync.Mutex
+	httpsMu      sync.Mutex // see mutex ordering comment at top of file
 	httpsByOwner map[types.NamespacedName]*ownerHTTPSStack
+
+	// Graceful drain for TLS-termination bidirectional copies. Close() signals
+	// closeCh (to interrupt active connections) and waits on drainWg.
+	closeCh chan struct{}
+	drainWg sync.WaitGroup
 }
 
 type ownerHTTPSStack struct {
@@ -102,6 +112,7 @@ func newIngressRouter(logger *slog.Logger, baseCtx context.Context, cp CertProvi
 		cp:                   cp,
 		ownerCancel:          make(map[types.NamespacedName]context.CancelFunc),
 		httpsByOwner:         make(map[types.NamespacedName]*ownerHTTPSStack),
+		closeCh:              make(chan struct{}),
 	}
 }
 
@@ -166,29 +177,15 @@ func (r *ingressRouter) registerOwnerCancel(owner types.NamespacedName, cancel c
 func (r *ingressRouter) SetRoute(owner types.NamespacedName, hostnames []string, targetAddr, mode string, proxyProto bool, oidcCfg *oidcConfig) error {
 	r.cancelOwner(owner)
 
-	r.mu.Lock()
+	// --- Phase 1: build everything outside the route mutex ---
 
 	var claimed []string
 	for _, h := range hostnames {
 		canon := canonicalTLSHostname(h)
-		if canon == "" {
-			continue
-		}
-		if existing, ok := r.tlsHostnameToService[canon]; ok && existing != owner {
-			r.mu.Unlock()
-			r.logger.Warn("route conflict", "hostname", canon, "existing_owner", existing.String(), "new_owner", owner.String())
-			return fmt.Errorf("host %s already in use", canon)
-		}
-		claimed = append(claimed, canon)
-	}
-
-	// Drop SNI index entries previously owned by this service.
-	for h, svc := range r.tlsHostnameToService {
-		if svc == owner {
-			delete(r.tlsHostnameToService, h)
+		if canon != "" {
+			claimed = append(claimed, canon)
 		}
 	}
-	delete(r.serviceBindings, owner)
 
 	ppVersion := 0
 	if proxyProto {
@@ -200,6 +197,13 @@ func (r *ingressRouter) SetRoute(owner types.NamespacedName, hostnames []string,
 	if oidcCfg != nil {
 		oidcCtx, oidcCancel = context.WithCancel(r.baseCtx)
 	}
+	// Ensure we cancel on any error path.
+	oidcCancelled := false
+	defer func() {
+		if oidcCancel != nil && !oidcCancelled {
+			oidcCancel()
+		}
+	}()
 
 	binding := &serviceBinding{
 		serviceRef: owner,
@@ -219,10 +223,6 @@ func (r *ingressRouter) SetRoute(owner types.NamespacedName, hostnames []string,
 		for _, canon := range claimed {
 			upstreamURL, err := url.Parse("http://" + targetAddr)
 			if err != nil {
-				if oidcCancel != nil {
-					oidcCancel()
-				}
-				r.mu.Unlock()
 				return fmt.Errorf("parsing upstream url for host %s: %w", canon, err)
 			}
 			rev := httputil.NewSingleHostReverseProxy(upstreamURL)
@@ -234,10 +234,6 @@ func (r *ingressRouter) SetRoute(owner types.NamespacedName, hostnames []string,
 				}
 				mw, err := builder(oidcCtx, canon, *oidcCfg)
 				if err != nil {
-					if oidcCancel != nil {
-						oidcCancel()
-					}
-					r.mu.Unlock()
 					return fmt.Errorf("building oidc middleware for host %s: %w", canon, err)
 				}
 				hdl = mw(hdl)
@@ -251,20 +247,19 @@ func (r *ingressRouter) SetRoute(owner types.NamespacedName, hostnames []string,
 	case modeTLSTermination:
 		// no httpsHosts
 	default:
-		r.mu.Unlock()
 		return fmt.Errorf("unsupported mode %q", mode)
 	}
 
-	for _, canon := range claimed {
-		r.tlsHostnameToService[canon] = owner
-		r.logger.Info("set route", "hostname", canon, "owner", owner.String(), "mode", mode, "target", targetAddr, "proxy_proto", proxyProto)
+	// --- Phase 2: install under the route mutex ---
+
+	if err := r.installBinding(owner, claimed, binding); err != nil {
+		return err
 	}
-	r.serviceBindings[owner] = binding
 
 	if oidcCancel != nil {
 		r.registerOwnerCancel(owner, oidcCancel)
+		oidcCancelled = true
 	}
-	r.mu.Unlock()
 
 	if mode == modeHTTPS {
 		if err := r.rebuildOwnerHTTPServer(owner); err != nil {
@@ -274,6 +269,36 @@ func (r *ingressRouter) SetRoute(owner types.NamespacedName, hostnames []string,
 		r.stopOwnerHTTPServer(owner)
 	}
 
+	return nil
+}
+
+// installBinding atomically validates hostname conflicts, clears old state, and
+// installs the new binding. Returns an error if a hostname is already claimed by
+// a different Service.
+func (r *ingressRouter) installBinding(owner types.NamespacedName, claimed []string, binding *serviceBinding) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for _, canon := range claimed {
+		if existing, ok := r.tlsHostnameToService[canon]; ok && existing != owner {
+			r.logger.Warn("route conflict", "hostname", canon, "existing_owner", existing.String(), "new_owner", owner.String())
+			return fmt.Errorf("host %s already in use", canon)
+		}
+	}
+
+	// Drop SNI index entries previously owned by this service.
+	for h, svc := range r.tlsHostnameToService {
+		if svc == owner {
+			delete(r.tlsHostnameToService, h)
+		}
+	}
+	delete(r.serviceBindings, owner)
+
+	for _, canon := range claimed {
+		r.tlsHostnameToService[canon] = owner
+		r.logger.Info("set route", "hostname", canon, "owner", owner.String(), "mode", binding.mode, "target", binding.targetAddr)
+	}
+	r.serviceBindings[owner] = binding
 	return nil
 }
 
@@ -464,6 +489,14 @@ func (r *ingressRouter) rebuildOwnerHTTPServer(owner types.NamespacedName) error
 	}
 
 	r.httpsMu.Lock()
+	defer r.httpsMu.Unlock()
+	_, err := r.buildOwnerHTTPServerLocked(owner)
+	return err
+}
+
+// buildOwnerHTTPServerLocked tears down any existing server for owner and
+// creates a new one. Caller must hold httpsMu.
+func (r *ingressRouter) buildOwnerHTTPServerLocked(owner types.NamespacedName) (*chanListener, error) {
 	r.stopOwnerHTTPServerLocked(owner)
 
 	ln := newChanListener()
@@ -475,11 +508,9 @@ func (r *ingressRouter) rebuildOwnerHTTPServer(owner types.NamespacedName) error
 	}
 	if err := http2.ConfigureServer(srv, &http2.Server{}); err != nil {
 		_ = ln.Close()
-		r.httpsMu.Unlock()
-		return fmt.Errorf("configuring http2: %w", err)
+		return nil, fmt.Errorf("configuring http2: %w", err)
 	}
 	r.httpsByOwner[owner] = &ownerHTTPSStack{ln: ln, srv: srv}
-	r.httpsMu.Unlock()
 
 	go func() {
 		err := srv.Serve(ln)
@@ -487,28 +518,19 @@ func (r *ingressRouter) rebuildOwnerHTTPServer(owner types.NamespacedName) error
 			r.logger.Error("https server exited", "owner", owner.String(), "error", err)
 		}
 	}()
-	return nil
+	return ln, nil
 }
 
+// ensureOwnerHTTPServer returns the chanListener for owner's HTTP server,
+// creating one if needed. The entire check-and-create is atomic under httpsMu.
 func (r *ingressRouter) ensureOwnerHTTPServer(owner types.NamespacedName) (*chanListener, error) {
 	r.httpsMu.Lock()
-	if s, ok := r.httpsByOwner[owner]; ok && s != nil && s.ln != nil {
-		ln := s.ln
-		r.httpsMu.Unlock()
-		return ln, nil
-	}
-	r.httpsMu.Unlock()
-
-	if err := r.rebuildOwnerHTTPServer(owner); err != nil {
-		return nil, err
-	}
-	r.httpsMu.Lock()
 	defer r.httpsMu.Unlock()
-	s := r.httpsByOwner[owner]
-	if s == nil || s.ln == nil {
-		return nil, fmt.Errorf("no https server for owner %s", owner.String())
+
+	if s, ok := r.httpsByOwner[owner]; ok && s != nil && s.ln != nil {
+		return s.ln, nil
 	}
-	return s.ln, nil
+	return r.buildOwnerHTTPServerLocked(owner)
 }
 
 func (r *ingressRouter) handleTerminateRoute(c *tcpproxy.Conn, b *serviceBinding) error {
@@ -534,6 +556,9 @@ func (r *ingressRouter) handleTerminateRoute(c *tcpproxy.Conn, b *serviceBinding
 		return nil
 	}
 
+	// TLS-termination mode: bidirectional copy with graceful drain support.
+	r.drainWg.Add(1)
+	defer r.drainWg.Done()
 	defer func() { _ = tlsConn.Close() }()
 
 	upstreamConn, err := net.Dial("tcp", b.targetAddr)
@@ -541,6 +566,18 @@ func (r *ingressRouter) handleTerminateRoute(c *tcpproxy.Conn, b *serviceBinding
 		return err
 	}
 	defer func() { _ = upstreamConn.Close() }()
+
+	// When Close() is called, set immediate deadlines to unblock io.Copy.
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-r.closeCh:
+			_ = tlsConn.SetDeadline(time.Now())
+			_ = upstreamConn.SetDeadline(time.Now())
+		case <-done:
+		}
+	}()
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -559,7 +596,16 @@ func (r *ingressRouter) handleTerminateRoute(c *tcpproxy.Conn, b *serviceBinding
 	return nil
 }
 
+const drainTimeout = 10 * time.Second
+
 func (r *ingressRouter) Close() error {
+	// Signal active TLS-termination connections to drain.
+	select {
+	case <-r.closeCh:
+	default:
+		close(r.closeCh)
+	}
+
 	r.httpsMu.Lock()
 	owners := make([]types.NamespacedName, 0, len(r.httpsByOwner))
 	for o := range r.httpsByOwner {
@@ -570,6 +616,18 @@ func (r *ingressRouter) Close() error {
 	}
 	r.httpsByOwner = make(map[types.NamespacedName]*ownerHTTPSStack)
 	r.httpsMu.Unlock()
+
+	// Wait for TLS-termination connections to finish, with a timeout.
+	ch := make(chan struct{})
+	go func() {
+		r.drainWg.Wait()
+		close(ch)
+	}()
+	select {
+	case <-ch:
+	case <-time.After(drainTimeout):
+		r.logger.Warn("tls termination drain timed out", "timeout", drainTimeout)
+	}
 	return nil
 }
 
