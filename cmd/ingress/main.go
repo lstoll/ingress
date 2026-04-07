@@ -112,10 +112,21 @@ func main() {
 	// TLS front: SNI index + per-Service bindings (see router.go model).
 	ir = newIngressRouter(log.With("component", "ingress-router"), ctx, cp)
 
+	healthInternalAddr := *healthListen
+	if *listenProxyProto && *healthListen != "0" && *healthListen != "" {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			log.Error("allocating internal health port", "error", err)
+			os.Exit(1)
+		}
+		healthInternalAddr = l.Addr().String()
+		_ = l.Close()
+	}
+
 	mgr, err := newMgr(cfg, mgrConfig{
 		watchNamespace: *watchNamespace,
 		metricsListen:  *metricsListen,
-		healthListen:   *healthListen,
+		healthListen:   healthInternalAddr,
 	}, &ServiceReconciler{
 		logger:   log.With("component", "service-reconciler"),
 		router:   ir,
@@ -147,6 +158,10 @@ func main() {
 	g.Add(func() error {
 		log.Info("starting TLS proxy listener", "addr", *tlsListen)
 		p.AddSNIMatchRoute(*tlsListen, ir.matchSNI, ir)
+		if *listenProxyProto && *healthListen != "0" && *healthListen != "" {
+			log.Info("starting TCP proxy for health server", "addr", *healthListen, "internal", healthInternalAddr)
+			p.AddRoute(*healthListen, tcpproxy.To(healthInternalAddr))
+		}
 		if err := p.Start(); err != nil {
 			return err
 		}
