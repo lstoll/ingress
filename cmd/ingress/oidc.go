@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,6 +25,7 @@ type oidcConfig struct {
 	// then sets it from verified claims for upstream.
 	UsernameHeader string
 	EmailHeader    string
+	BypassPatterns []string
 	RequireGroup   string
 }
 
@@ -130,6 +132,13 @@ func buildMiddlewareForHost(ctx context.Context, incomingHostname string, cfg oi
 
 	return func(h http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			for _, p := range cfg.BypassPatterns {
+				if strings.HasPrefix(r.URL.Path, p) {
+					withInboundHeaderStrip(h).ServeHTTP(w, r)
+					return
+				}
+			}
+
 			refreshMu.RLock()
 			mw := currentMw
 			refreshMu.RUnlock()

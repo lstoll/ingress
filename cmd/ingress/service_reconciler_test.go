@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"net/http"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -150,6 +152,9 @@ func TestServiceReconcileRemovesRouteForWrongInstance(t *testing.T) {
 func TestServiceReconcileOIDCConfigValidation(t *testing.T) {
 	ctx := context.Background()
 	router := newIngressRouter(testLogger(), ctx, nil)
+	router.authMiddlewareBuilder = func(_ context.Context, _ string, _ oidcConfig) (func(http.Handler) http.Handler, error) {
+		return func(h http.Handler) http.Handler { return h }, nil
+	}
 	r := &ServiceReconciler{
 		logger:   testLogger(),
 		router:   router,
@@ -186,5 +191,24 @@ func TestServiceReconcileOIDCConfigValidation(t *testing.T) {
 	}
 	if _, ok := router.RouteFor("auth.example.com"); ok {
 		t.Fatalf("expected no route when oidc dynamic client is not true")
+	}
+
+	// Update svc with valid OIDC config
+	svc.Annotations[annOIDCDynamicClient] = "true"
+	svc.Annotations[annOIDCBypassPatterns] = "/pub,/api/v1/health"
+	r.Client = fake.NewClientBuilder().WithScheme(scheme).WithObjects(svc).Build()
+
+	if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: svc.Name}}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	route, ok := router.RouteFor("auth.example.com")
+	if !ok {
+		t.Fatalf("expected route when oidc dynamic client is true")
+	}
+	if route.OIDC == nil {
+		t.Fatalf("expected OIDC config to be set")
+	}
+	if len(route.OIDC.BypassPatterns) != 2 || route.OIDC.BypassPatterns[0] != "/pub" || route.OIDC.BypassPatterns[1] != "/api/v1/health" {
+		t.Fatalf("expected bypass patterns to be parsed, got %v", route.OIDC.BypassPatterns)
 	}
 }

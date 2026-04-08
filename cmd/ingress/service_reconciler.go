@@ -25,6 +25,7 @@ const (
 	annOIDCDynamicClient       = "ingress.lds.li/oidc-dynamic-client"
 	annOIDCUsernameHeader      = "ingress.lds.li/oidc-preferred-username-header"
 	annOIDCEmailHeader         = "ingress.lds.li/oidc-email-header"
+	annOIDCBypassPatterns      = "ingress.lds.li/oidc-bypass-patterns"
 	annRequireGroup            = "ingress.lds.li/require-group"
 	modeTLSPassthrough         = "tls-passthrough"
 	modeTLSTermination         = "tls-termination"
@@ -108,6 +109,7 @@ func (s *ServiceReconciler) Reconcile(ctx context.Context, req reconcile.Request
 			Issuer:         issuer,
 			UsernameHeader: strings.TrimSpace(svc.Annotations[annOIDCUsernameHeader]),
 			EmailHeader:    strings.TrimSpace(svc.Annotations[annOIDCEmailHeader]),
+			BypassPatterns: splitCSV(svc.Annotations[annOIDCBypassPatterns]),
 			RequireGroup:   strings.TrimSpace(svc.Annotations[annRequireGroup]),
 		}
 	}
@@ -146,3 +148,4 @@ func splitCSV(v string) []string {
 	}
 	return out
 }
+
