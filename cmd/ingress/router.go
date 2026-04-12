@@ -47,6 +47,7 @@ type serviceBinding struct {
 	targetAddr string
 
 	passthrough *tcpproxy.DialProxy
+	tcpListener string
 
 	// modeHTTPS: canonical hostname → vhost handler chain for that Service.
 	httpsHosts map[string]httpsHostBinding
@@ -81,6 +82,8 @@ type ingressRouter struct {
 
 	// Layer 1 — SNI / redirect / cert policy: canonical hostname → owning Service.
 	tlsHostnameToService map[string]types.NamespacedName
+	// Layer 1.5 — TCP listener: listener name → owning Service.
+	tcpListenerToService map[string]types.NamespacedName
 	// Layer 2 — workload: Service → how to run traffic for that Service.
 	serviceBindings map[types.NamespacedName]*serviceBinding
 
@@ -108,6 +111,7 @@ func newIngressRouter(logger *slog.Logger, baseCtx context.Context, cp CertProvi
 		logger:               logger,
 		baseCtx:              baseCtx,
 		tlsHostnameToService: make(map[string]types.NamespacedName),
+		tcpListenerToService: make(map[string]types.NamespacedName),
 		serviceBindings:      make(map[types.NamespacedName]*serviceBinding),
 		cp:                   cp,
 		ownerCancel:          make(map[types.NamespacedName]context.CancelFunc),
@@ -174,7 +178,7 @@ func (r *ingressRouter) registerOwnerCancel(owner types.NamespacedName, cancel c
 	r.ownerCancel[owner] = cancel
 }
 
-func (r *ingressRouter) SetRoute(owner types.NamespacedName, hostnames []string, targetAddr, mode string, proxyProto bool, oidcCfg *oidcConfig) error {
+func (r *ingressRouter) SetRoute(owner types.NamespacedName, hostnames []string, targetAddr, mode string, proxyProto bool, oidcCfg *oidcConfig, tcpListener string) error {
 	r.cancelOwner(owner)
 
 	// --- Phase 1: build everything outside the route mutex ---
@@ -206,13 +210,19 @@ func (r *ingressRouter) SetRoute(owner types.NamespacedName, hostnames []string,
 	}()
 
 	binding := &serviceBinding{
-		serviceRef: owner,
-		mode:       mode,
-		targetAddr: targetAddr,
-		hostnames:  append([]string(nil), claimed...),
+		serviceRef:  owner,
+		mode:        mode,
+		targetAddr:  targetAddr,
+		hostnames:   append([]string(nil), claimed...),
+		tcpListener: tcpListener,
 	}
 
 	switch mode {
+	case modeTCP:
+		binding.passthrough = &tcpproxy.DialProxy{
+			Addr:                 targetAddr,
+			ProxyProtocolVersion: ppVersion,
+		}
 	case modeTLSPassthrough:
 		binding.passthrough = &tcpproxy.DialProxy{
 			Addr:                 targetAddr,
@@ -285,6 +295,12 @@ func (r *ingressRouter) installBinding(owner types.NamespacedName, claimed []str
 			return fmt.Errorf("host %s already in use", canon)
 		}
 	}
+	if binding.tcpListener != "" {
+		if existing, ok := r.tcpListenerToService[binding.tcpListener]; ok && existing != owner {
+			r.logger.Warn("tcp listener conflict", "listener", binding.tcpListener, "existing_owner", existing.String(), "new_owner", owner.String())
+			return fmt.Errorf("tcp listener %s already in use", binding.tcpListener)
+		}
+	}
 
 	// Drop SNI index entries previously owned by this service.
 	for h, svc := range r.tlsHostnameToService {
@@ -292,11 +308,21 @@ func (r *ingressRouter) installBinding(owner types.NamespacedName, claimed []str
 			delete(r.tlsHostnameToService, h)
 		}
 	}
+	// Drop TCP listener entries previously owned by this service.
+	for l, svc := range r.tcpListenerToService {
+		if svc == owner {
+			delete(r.tcpListenerToService, l)
+		}
+	}
 	delete(r.serviceBindings, owner)
 
 	for _, canon := range claimed {
 		r.tlsHostnameToService[canon] = owner
 		r.logger.Info("set route", "hostname", canon, "owner", owner.String(), "mode", binding.mode, "target", binding.targetAddr)
+	}
+	if binding.tcpListener != "" {
+		r.tcpListenerToService[binding.tcpListener] = owner
+		r.logger.Info("set tcp route", "listener", binding.tcpListener, "owner", owner.String(), "target", binding.targetAddr)
 	}
 	r.serviceBindings[owner] = binding
 
@@ -326,6 +352,12 @@ func (r *ingressRouter) RemoveRoute(owner types.NamespacedName) {
 			r.logger.Info("removed route", "owner", owner.String(), "hostname", h)
 		}
 	}
+	for l, svc := range r.tcpListenerToService {
+		if svc == owner {
+			delete(r.tcpListenerToService, l)
+			r.logger.Info("removed tcp route", "owner", owner.String(), "listener", l)
+		}
+	}
 	delete(r.serviceBindings, owner)
 	r.updateRouteGaugeLocked()
 	r.mu.Unlock()
@@ -344,6 +376,16 @@ func (r *ingressRouter) RouteFor(hostName string) (route, bool) {
 		return route{}, false
 	}
 	b := r.lookupBindingByTLSHostname(key)
+	if b == nil {
+		// Try TCP listeners
+		r.mu.RLock()
+		defer r.mu.RUnlock()
+		owner, ok := r.tcpListenerToService[hostName]
+		if !ok {
+			return route{}, false
+		}
+		b = r.serviceBindings[owner]
+	}
 	if b == nil {
 		return route{}, false
 	}
@@ -365,6 +407,41 @@ func (r *ingressRouter) RouteFor(hostName string) (route, bool) {
 
 func (r *ingressRouter) HasHost(hostName string) bool {
 	return r.tlsHostnameKnown(canonicalTLSHostname(hostName))
+}
+
+type tcpTarget struct {
+	r            *ingressRouter
+	listenerName string
+}
+
+func (t *tcpTarget) HandleConn(c net.Conn) {
+	t.r.mu.RLock()
+	owner, ok := t.r.tcpListenerToService[t.listenerName]
+	if !ok {
+		t.r.mu.RUnlock()
+		t.r.logger.Debug("no tcp route for listener", "listener", t.listenerName)
+		_ = c.Close()
+		return
+	}
+	b := t.r.serviceBindings[owner]
+	t.r.mu.RUnlock()
+
+	if b == nil || b.passthrough == nil {
+		t.r.logger.Debug("no backend for tcp listener", "listener", t.listenerName)
+		_ = c.Close()
+		return
+	}
+
+	connectionsTotal.WithLabelValues(b.mode).Inc()
+	connectionsActive.WithLabelValues(b.mode).Inc()
+	defer connectionsActive.WithLabelValues(b.mode).Dec()
+
+	t.r.logger.Debug("dialing tcp target", "listener", t.listenerName, "target", b.passthrough.Addr)
+	b.passthrough.HandleConn(c)
+}
+
+func (r *ingressRouter) TCPProxyTarget(listenerName string) tcpproxy.Target {
+	return &tcpTarget{r: r, listenerName: listenerName}
 }
 
 func (r *ingressRouter) DialProxyFor(hostName string) (*tcpproxy.DialProxy, error) {

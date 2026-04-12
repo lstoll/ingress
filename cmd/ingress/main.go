@@ -33,6 +33,17 @@ import (
 
 var scheme = k8sscheme.Scheme
 
+type stringSlice []string
+
+func (s *stringSlice) String() string {
+	return strings.Join(*s, ", ")
+}
+
+func (s *stringSlice) Set(value string) error {
+	*s = append(*s, value)
+	return nil
+}
+
 func main() {
 	ctx := context.Background()
 	version := readVersion()
@@ -53,7 +64,10 @@ func main() {
 		healthListen            = fs.String("health-listen", ":8080", "Health probe listen address (set to 0 to disable)")
 		logLevel                = fs.String("log-level", envOrDefault("INGRESS_LOG_LEVEL", "info"), "Log level: debug, info, warn, error")
 		showVersion             = fs.Bool("version", false, "Print version and exit")
+
+		tcpListeners stringSlice
 	)
+	fs.Var(&tcpListeners, "tcp-listener", "Named TCP listener, format: name=addr (can be specified multiple times)")
 
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		os.Exit(2)
@@ -61,6 +75,16 @@ func main() {
 	if *showVersion {
 		fmt.Println(version)
 		return
+	}
+
+	tcpListenMap := make(map[string]string)
+	for _, tl := range tcpListeners {
+		parts := strings.SplitN(tl, "=", 2)
+		if len(parts) != 2 {
+			fmt.Fprintf(os.Stderr, "invalid tcp-listener format %q, expected name=addr\n", tl)
+			os.Exit(2)
+		}
+		tcpListenMap[parts[0]] = parts[1]
 	}
 
 	appLogger, err := setupLogger(*logLevel, os.Stdout, term.IsTerminal(int(os.Stdout.Fd())))
@@ -83,6 +107,7 @@ func main() {
 		"listen_proxy_protocol", *listenProxyProto,
 		"listen_proxy_protocol_timeout", listenProxyProtoTimeout.String(),
 		"http_listen", *httpListen,
+		"tcp_listeners", tcpListenMap,
 		"watch_namespace", *watchNamespace,
 		"cert_mode", *certMode,
 	)
@@ -158,6 +183,10 @@ func main() {
 	g.Add(func() error {
 		log.Info("starting TLS proxy listener", "addr", *tlsListen)
 		p.AddSNIMatchRoute(*tlsListen, ir.matchSNI, ir)
+		for name, addr := range tcpListenMap {
+			log.Info("starting TCP proxy listener", "name", name, "addr", addr)
+			p.AddRoute(addr, ir.TCPProxyTarget(name))
+		}
 		if *listenProxyProto && *healthListen != "0" && *healthListen != "" {
 			log.Info("starting TCP proxy for health server", "addr", *healthListen, "internal", healthInternalAddr)
 			p.AddRoute(*healthListen, tcpproxy.To(healthInternalAddr))

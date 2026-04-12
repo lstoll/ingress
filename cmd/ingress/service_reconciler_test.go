@@ -267,3 +267,52 @@ func TestServiceReconcileOIDCExplicitConfig(t *testing.T) {
 		t.Fatalf("expected client secret to be 'my-client-secret', got '%s'", route.OIDC.ClientSecret)
 	}
 }
+
+func TestServiceReconcileTCPConfig(t *testing.T) {
+	ctx := context.Background()
+	router := newIngressRouter(testLogger(), ctx, nil)
+	r := &ServiceReconciler{
+		logger:   testLogger(),
+		router:   router,
+		instance: "ingress1",
+	}
+
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "backend-tcp",
+			Namespace: "default",
+			Labels: map[string]string{
+				labelIngressInstance: "ingress1",
+			},
+			Annotations: map[string]string{
+				annMode:        modeTCP,
+				annTCPListener: "smtp",
+			},
+		},
+		Spec: corev1.ServiceSpec{
+			ClusterIP: "10.0.0.97",
+			Ports: []corev1.ServicePort{
+				{Port: 25},
+			},
+		},
+	}
+	r.Client = fake.NewClientBuilder().WithScheme(scheme).WithObjects(svc).Build()
+
+	if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: svc.Name}}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	// RouteFor should work with listener name
+	route, ok := router.RouteFor("smtp")
+	if !ok {
+		t.Fatalf("expected route when oidc explicit config is provided")
+	}
+	if route.Mode != modeTCP {
+		t.Fatalf("expected mode to be 'tcp', got '%s'", route.Mode)
+	}
+	if route.TargetAddr != "10.0.0.97:25" {
+		t.Fatalf("expected target addr to be '10.0.0.97:25', got '%s'", route.TargetAddr)
+	}
+	if route.Proxy == nil {
+		t.Fatalf("expected Proxy (DialProxy) to be set for tcp mode")
+	}
+}

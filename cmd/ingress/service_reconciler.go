@@ -51,6 +51,8 @@ const (
 	annOIDCBypassPatterns = "ingress.lds.li/oidc-bypass-patterns"
 	// annRequireGroup is an OIDC group name required for successful authentication.
 	annRequireGroup = "ingress.lds.li/require-group"
+	// annTCPListener is the name of a raw TCP listener this service should claim.
+	annTCPListener = "ingress.lds.li/tcp-listener"
 
 	// modeTLSPassthrough is the mode for transparently passing through TLS connections to the backend.
 	modeTLSPassthrough = "tls-passthrough"
@@ -58,6 +60,8 @@ const (
 	modeTLSTermination = "tls-termination"
 	// modeHTTPS is the mode for terminating TLS and proxying HTTP requests to the backend.
 	modeHTTPS = "https"
+	// modeTCP is the mode for raw TCP proxying from a named listener.
+	modeTCP = "tcp"
 	// authModeOIDC is the OIDC authentication mode value.
 	authModeOIDC = "OIDC"
 	// proxyProtocolVersion1Value is the value to enable Proxy Protocol v1.
@@ -94,7 +98,7 @@ func (s *ServiceReconciler) Reconcile(ctx context.Context, req reconcile.Request
 	}
 
 	mode := svc.Annotations[annMode]
-	if mode != modeTLSPassthrough && mode != modeTLSTermination && mode != modeHTTPS {
+	if mode != modeTLSPassthrough && mode != modeTLSTermination && mode != modeHTTPS && mode != modeTCP {
 		s.logger.Debug("unsupported service mode; removing routes", "mode", mode, "name", req.Name, "namespace", req.Namespace)
 		s.router.RemoveRoute(req.NamespacedName)
 		return reconcile.Result{}, nil
@@ -105,7 +109,7 @@ func (s *ServiceReconciler) Reconcile(ctx context.Context, req reconcile.Request
 		hostnamesAnn = annHTTPHostnames
 	}
 	hostnames := splitCSV(svc.Annotations[hostnamesAnn])
-	if len(hostnames) == 0 {
+	if mode != modeTCP && len(hostnames) == 0 {
 		s.logger.Debug("service has no hostnames; removing routes", "annotation", hostnamesAnn, "name", req.Name, "namespace", req.Namespace)
 		s.router.RemoveRoute(req.NamespacedName)
 		return reconcile.Result{}, nil
@@ -119,6 +123,16 @@ func (s *ServiceReconciler) Reconcile(ctx context.Context, req reconcile.Request
 
 	targetAddr := net.JoinHostPort(svc.Spec.ClusterIP, strconv.Itoa(int(svc.Spec.Ports[0].Port)))
 	proxyProto := svc.Annotations[annProxyProtocol] == proxyProtocolVersion1Value
+
+	var tcpListener string
+	if mode == modeTCP {
+		tcpListener = strings.TrimSpace(svc.Annotations[annTCPListener])
+		if tcpListener == "" {
+			s.logger.Info("ignoring service: missing tcp listener for mode tcp", "name", req.Name, "namespace", req.Namespace)
+			s.router.RemoveRoute(req.NamespacedName)
+			return reconcile.Result{}, nil
+		}
+	}
 
 	var oidcCfg *oidcConfig
 	if mode == modeHTTPS && strings.EqualFold(svc.Annotations[annAuthMode], authModeOIDC) {
@@ -156,7 +170,7 @@ func (s *ServiceReconciler) Reconcile(ctx context.Context, req reconcile.Request
 		}
 	}
 
-	if err := s.router.SetRoute(req.NamespacedName, hostnames, targetAddr, mode, proxyProto, oidcCfg); err != nil {
+	if err := s.router.SetRoute(req.NamespacedName, hostnames, targetAddr, mode, proxyProto, oidcCfg, tcpListener); err != nil {
 		reconcileTotal.WithLabelValues("error").Inc()
 		return reconcile.Result{}, err
 	}
@@ -168,6 +182,7 @@ func (s *ServiceReconciler) Reconcile(ctx context.Context, req reconcile.Request
 		"hostnames", len(hostnames),
 		"target", targetAddr,
 		"oidc", oidcCfg != nil,
+		"tcp_listener", tcpListener,
 	)
 	return reconcile.Result{}, nil
 }
