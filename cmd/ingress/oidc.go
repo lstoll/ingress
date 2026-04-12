@@ -25,6 +25,7 @@ type oidcConfig struct {
 	// then sets it from verified claims for upstream.
 	UsernameHeader string
 	EmailHeader    string
+	NameHeader     string
 	BypassPatterns []string
 	RequireGroup   string
 
@@ -48,6 +49,9 @@ func buildMiddlewareForHost(ctx context.Context, incomingHostname string, cfg oi
 			}
 			if cfg.EmailHeader != "" {
 				r.Header.Del(cfg.EmailHeader)
+			}
+			if cfg.NameHeader != "" {
+				r.Header.Del(cfg.NameHeader)
 			}
 			h.ServeHTTP(w, r)
 		})
@@ -80,6 +84,11 @@ func buildMiddlewareForHost(ctx context.Context, incomingHostname string, cfg oi
 				if cfg.EmailHeader != "" {
 					if email, err := cl.Email(); err == nil && email != "" {
 						r.Header.Set(cfg.EmailHeader, email)
+					}
+				}
+				if cfg.NameHeader != "" {
+					if name, err := cl.Name(); err == nil && name != "" {
+						r.Header.Set(cfg.NameHeader, name)
 					}
 				}
 

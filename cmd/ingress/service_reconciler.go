@@ -27,6 +27,7 @@ const (
 	annOIDCClientSecret        = "ingress.lds.li/oidc-client-secret"
 	annOIDCUsernameHeader      = "ingress.lds.li/oidc-preferred-username-header"
 	annOIDCEmailHeader         = "ingress.lds.li/oidc-email-header"
+	annOIDCNameHeader          = "ingress.lds.li/oidc-name-header"
 	annOIDCBypassPatterns      = "ingress.lds.li/oidc-bypass-patterns"
 	annRequireGroup            = "ingress.lds.li/require-group"
 	modeTLSPassthrough         = "tls-passthrough"
@@ -119,6 +120,7 @@ func (s *ServiceReconciler) Reconcile(ctx context.Context, req reconcile.Request
 			ClientSecret:   clientSecret,
 			UsernameHeader: strings.TrimSpace(svc.Annotations[annOIDCUsernameHeader]),
 			EmailHeader:    strings.TrimSpace(svc.Annotations[annOIDCEmailHeader]),
+			NameHeader:     strings.TrimSpace(svc.Annotations[annOIDCNameHeader]),
 			BypassPatterns: splitCSV(svc.Annotations[annOIDCBypassPatterns]),
 			RequireGroup:   strings.TrimSpace(svc.Annotations[annRequireGroup]),
 		}

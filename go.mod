@@ -13,7 +13,7 @@ require (
 	k8s.io/api v0.35.3
 	k8s.io/apimachinery v0.35.3
 	k8s.io/client-go v0.35.3
-	lds.li/oauth2ext v0.3.1
+	lds.li/oauth2ext v0.3.2-0.20260412185417-6223398b4593
 	sigs.k8s.io/controller-runtime v0.23.3
 )
 
