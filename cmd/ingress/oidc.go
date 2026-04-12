@@ -84,6 +84,7 @@ func buildMiddlewareForHost(ctx context.Context, incomingHostname string, cfg oi
 
 				cl, ok := omw.IDClaimsFromContext(r.Context())
 				if !ok {
+					slog.Debug("oidc: request unauthenticated", "hostname", incomingHostname)
 					if cfg.AllowUnauthenticated {
 						h.ServeHTTP(w, r)
 						return
@@ -113,6 +114,8 @@ func buildMiddlewareForHost(ctx context.Context, incomingHostname string, cfg oi
 						r.Header.Set(cfg.NameHeader, name)
 					}
 				}
+
+				slog.Debug("oidc: request authenticated", "hostname", incomingHostname, cfg.UsernameHeader, r.Header.Get(cfg.UsernameHeader), cfg.EmailHeader, r.Header.Get(cfg.EmailHeader), cfg.NameHeader, r.Header.Get(cfg.NameHeader))
 
 				h.ServeHTTP(w, r)
 			}))
