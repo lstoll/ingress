@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"lds.li/oauth2ext/claims"
 	"lds.li/oauth2ext/middleware"
@@ -31,6 +33,10 @@ type oidcConfig struct {
 
 	ClientID     string
 	ClientSecret string
+
+	AllowUnauthenticated bool
+	LoginPath            string
+	LogoutPath           string
 }
 
 func buildMiddlewareForHost(ctx context.Context, incomingHostname string, cfg oidcConfig) (func(http.Handler) http.Handler, error) {
@@ -62,10 +68,26 @@ func buildMiddlewareForHost(ctx context.Context, incomingHostname string, cfg oi
 		if err != nil {
 			return nil, fmt.Errorf("oidc: from discovery: %w", err)
 		}
+		omw.AllowUnauthenticated = cfg.AllowUnauthenticated
+
 		return func(h http.Handler) http.Handler {
 			return omw.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if cfg.LoginPath != "" && r.URL.Path == cfg.LoginPath {
+					omw.ServeLogin(w, r, safeRedirectTarget(r, cfg.LoginPath))
+					return
+				}
+				if cfg.LogoutPath != "" && r.URL.Path == cfg.LogoutPath {
+					omw.ServeLogout(w, r, safeRedirectTarget(r, cfg.LogoutPath))
+					http.Redirect(w, r, safeRedirectTarget(r, cfg.LogoutPath), http.StatusFound)
+					return
+				}
+
 				cl, ok := omw.IDClaimsFromContext(r.Context())
 				if !ok {
+					if cfg.AllowUnauthenticated {
+						h.ServeHTTP(w, r)
+						return
+					}
 					http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 					return
 				}
@@ -234,4 +256,71 @@ func claimsHasGroup(cl *claims.VerifiedID, required string) bool {
 		}
 	}
 	return false
+}
+
+// maxPathReturnToLen matches oauth2ext/middleware.sanitizeReturnTo.
+const maxPathReturnToLen = 8192
+
+// sanitizePathReturnTo returns a safe in-app redirect target: path-absolute,
+// optional query, no scheme/host, no fragment. Invalid input falls back to "/".
+// (Same rules as lds.li/oauth2ext/middleware.sanitizeReturnTo, which is not exported.)
+func sanitizePathReturnTo(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "/"
+	}
+	if len(s) > maxPathReturnToLen {
+		return "/"
+	}
+	for _, c := range s {
+		if unicode.IsControl(c) {
+			return "/"
+		}
+	}
+	if strings.Contains(s, "#") {
+		return "/"
+	}
+
+	pathPart, _, hasQuery := strings.Cut(s, "?")
+	if strings.Contains(pathPart, "://") || strings.HasPrefix(pathPart, "//") {
+		return "/"
+	}
+	if strings.Contains(pathPart, `\`) {
+		return "/"
+	}
+	if !strings.HasPrefix(pathPart, "/") {
+		return "/"
+	}
+	if hasQuery {
+		for _, c := range s[len(pathPart)+1:] {
+			if unicode.IsControl(c) {
+				return "/"
+			}
+		}
+	}
+
+	u, err := url.Parse(s)
+	if err != nil {
+		return "/"
+	}
+	if u.Scheme != "" || u.Host != "" || u.User != nil || u.Opaque != "" {
+		return "/"
+	}
+	return s
+}
+
+// safeRedirectTarget reads ?redirect= (sanitized in-app URL), default "/".
+// avoidPath is never returned so login/logout handlers do not redirect to themselves.
+// For login, an explicit target is required: an empty returnTo in ServeLogin makes
+// oauth2ext use the current request URI and causes a post-callback redirect loop.
+func safeRedirectTarget(r *http.Request, avoidPath string) string {
+	raw := strings.TrimSpace(r.URL.Query().Get("redirect"))
+	if raw == "" {
+		return "/"
+	}
+	s := sanitizePathReturnTo(raw)
+	if avoidPath != "" && (s == avoidPath || strings.HasPrefix(s, avoidPath+"?")) {
+		return "/"
+	}
+	return s
 }

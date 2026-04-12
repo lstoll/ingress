@@ -15,25 +15,52 @@ import (
 )
 
 const (
-	labelIngressInstance       = "ingress.lds.li/instance"
-	annMode                    = "ingress.lds.li/mode"
-	annSNIHostnames            = "ingress.lds.li/sni-hostnames"
-	annHTTPHostnames           = "ingress.lds.li/hostnames"
-	annProxyProtocol           = "ingress.lds.li/proxy-protocol"
-	annAuthMode                = "ingress.lds.li/auth-mode"
-	annOIDCIssuer              = "ingress.lds.li/oidc-issuer"
-	annOIDCDynamicClient       = "ingress.lds.li/oidc-dynamic-client"
-	annOIDCClientID            = "ingress.lds.li/oidc-client-id"
-	annOIDCClientSecret        = "ingress.lds.li/oidc-client-secret"
-	annOIDCUsernameHeader      = "ingress.lds.li/oidc-preferred-username-header"
-	annOIDCEmailHeader         = "ingress.lds.li/oidc-email-header"
-	annOIDCNameHeader          = "ingress.lds.li/oidc-name-header"
-	annOIDCBypassPatterns      = "ingress.lds.li/oidc-bypass-patterns"
-	annRequireGroup            = "ingress.lds.li/require-group"
-	modeTLSPassthrough         = "tls-passthrough"
-	modeTLSTermination         = "tls-termination"
-	modeHTTPS                  = "https"
-	authModeOIDC               = "OIDC"
+	// labelIngressInstance is the label used to identify which ingress instance should manage this service.
+	labelIngressInstance = "ingress.lds.li/instance"
+	// annMode defines the proxying mode: tls-passthrough, tls-termination, or https.
+	annMode = "ingress.lds.li/mode"
+	// annSNIHostnames is a comma-separated list of hostnames for SNI-based routing (tls-passthrough/termination).
+	annSNIHostnames = "ingress.lds.li/sni-hostnames"
+	// annHTTPHostnames is a comma-separated list of hostnames for HTTP-based routing (https).
+	annHTTPHostnames = "ingress.lds.li/hostnames"
+	// annProxyProtocol enables Proxy Protocol v1 if set to "v1".
+	annProxyProtocol = "ingress.lds.li/proxy-protocol"
+	// annAuthMode sets the authentication mode, e.g., "OIDC".
+	annAuthMode = "ingress.lds.li/auth-mode"
+	// annOIDCIssuer is the OIDC provider issuer URL.
+	annOIDCIssuer = "ingress.lds.li/oidc-issuer"
+	// annOIDCDynamicClient enables dynamic OIDC client registration if set to "true".
+	annOIDCDynamicClient = "ingress.lds.li/oidc-dynamic-client"
+	// annOIDCAllowUnauthenticated allows unauthenticated requests to reach the backend if set to "true".
+	annOIDCAllowUnauthenticated = "ingress.lds.li/oidc-allow-unauthenticated"
+	// annOIDCLoginPath is the path that triggers the OIDC login flow.
+	annOIDCLoginPath = "ingress.lds.li/oidc-login-path"
+	// annOIDCLogoutPath is the path that triggers the OIDC logout flow.
+	annOIDCLogoutPath = "ingress.lds.li/oidc-logout-path"
+	// annOIDCClientID is an explicit OIDC client ID to use instead of dynamic registration.
+	annOIDCClientID = "ingress.lds.li/oidc-client-id"
+	// annOIDCClientSecret is an explicit OIDC client secret to use instead of dynamic registration.
+	annOIDCClientSecret = "ingress.lds.li/oidc-client-secret"
+	// annOIDCUsernameHeader is the header to populate with the preferred_username claim.
+	annOIDCUsernameHeader = "ingress.lds.li/oidc-preferred-username-header"
+	// annOIDCEmailHeader is the header to populate with the email claim.
+	annOIDCEmailHeader = "ingress.lds.li/oidc-email-header"
+	// annOIDCNameHeader is the header to populate with the name claim.
+	annOIDCNameHeader = "ingress.lds.li/oidc-name-header"
+	// annOIDCBypassPatterns is a comma-separated list of path prefixes to bypass OIDC authentication.
+	annOIDCBypassPatterns = "ingress.lds.li/oidc-bypass-patterns"
+	// annRequireGroup is an OIDC group name required for successful authentication.
+	annRequireGroup = "ingress.lds.li/require-group"
+
+	// modeTLSPassthrough is the mode for transparently passing through TLS connections to the backend.
+	modeTLSPassthrough = "tls-passthrough"
+	// modeTLSTermination is the mode for terminating TLS at the ingress and proxying the connection to the backend.
+	modeTLSTermination = "tls-termination"
+	// modeHTTPS is the mode for terminating TLS and proxying HTTP requests to the backend.
+	modeHTTPS = "https"
+	// authModeOIDC is the OIDC authentication mode value.
+	authModeOIDC = "OIDC"
+	// proxyProtocolVersion1Value is the value to enable Proxy Protocol v1.
 	proxyProtocolVersion1Value = "v1"
 )
 
@@ -115,14 +142,17 @@ func (s *ServiceReconciler) Reconcile(ctx context.Context, req reconcile.Request
 		}
 
 		oidcCfg = &oidcConfig{
-			Issuer:         issuer,
-			ClientID:       clientID,
-			ClientSecret:   clientSecret,
-			UsernameHeader: strings.TrimSpace(svc.Annotations[annOIDCUsernameHeader]),
-			EmailHeader:    strings.TrimSpace(svc.Annotations[annOIDCEmailHeader]),
-			NameHeader:     strings.TrimSpace(svc.Annotations[annOIDCNameHeader]),
-			BypassPatterns: splitCSV(svc.Annotations[annOIDCBypassPatterns]),
-			RequireGroup:   strings.TrimSpace(svc.Annotations[annRequireGroup]),
+			Issuer:               issuer,
+			ClientID:             clientID,
+			ClientSecret:         clientSecret,
+			UsernameHeader:       strings.TrimSpace(svc.Annotations[annOIDCUsernameHeader]),
+			EmailHeader:          strings.TrimSpace(svc.Annotations[annOIDCEmailHeader]),
+			NameHeader:           strings.TrimSpace(svc.Annotations[annOIDCNameHeader]),
+			BypassPatterns:       splitCSV(svc.Annotations[annOIDCBypassPatterns]),
+			RequireGroup:         strings.TrimSpace(svc.Annotations[annRequireGroup]),
+			AllowUnauthenticated: strings.EqualFold(svc.Annotations[annOIDCAllowUnauthenticated], "true"),
+			LoginPath:            strings.TrimSpace(svc.Annotations[annOIDCLoginPath]),
+			LogoutPath:           strings.TrimSpace(svc.Annotations[annOIDCLogoutPath]),
 		}
 	}
 
