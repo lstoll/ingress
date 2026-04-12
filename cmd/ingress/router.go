@@ -99,6 +99,8 @@ type ingressRouter struct {
 	// closeCh (to interrupt active connections) and waits on drainWg.
 	closeCh chan struct{}
 	drainWg sync.WaitGroup
+
+	proxyBufPool *proxyBufPool
 }
 
 type ownerHTTPSStack struct {
@@ -117,6 +119,7 @@ func newIngressRouter(logger *slog.Logger, baseCtx context.Context, cp CertProvi
 		ownerCancel:          make(map[types.NamespacedName]context.CancelFunc),
 		httpsByOwner:         make(map[types.NamespacedName]*ownerHTTPSStack),
 		closeCh:              make(chan struct{}),
+		proxyBufPool:         newProxyBufPool(),
 	}
 }
 
@@ -235,7 +238,26 @@ func (r *ingressRouter) SetRoute(owner types.NamespacedName, hostnames []string,
 			if err != nil {
 				return fmt.Errorf("parsing upstream url for host %s: %w", canon, err)
 			}
-			rev := httputil.NewSingleHostReverseProxy(upstreamURL)
+			rev := &httputil.ReverseProxy{
+				Rewrite: func(req *httputil.ProxyRequest) {
+					req.SetURL(upstreamURL)
+					req.Out.Host = req.In.Host
+					req.SetXForwarded()
+					var outHeaders strings.Builder
+					for k, h := range req.Out.Header {
+						for _, v := range h {
+							outHeaders.WriteString(k + ": " + v + ",")
+						}
+					}
+					slog.Debug("reverse proxy rewrite", "inHost", req.In.Host, "outHost", req.Out.Host, "outUrl", req.Out.URL.String(), "outHeaders", outHeaders.String())
+				},
+				ErrorHandler: func(rw http.ResponseWriter, req *http.Request, err error) {
+					slog.Warn("reverse proxy error", "error", err)
+					rw.WriteHeader(http.StatusBadGateway)
+					_, _ = rw.Write([]byte(http.StatusText(http.StatusBadGateway)))
+				},
+				BufferPool: r.proxyBufPool,
+			}
 			hdl := http.Handler(rev)
 			if oidcCfg != nil {
 				builder := r.authMiddlewareBuilder
@@ -794,4 +816,38 @@ func (l *chanListener) pushConn(c net.Conn) error {
 	case <-l.closed:
 		return net.ErrClosed
 	}
+}
+
+const proxyBufferSize = 32 * 1024
+
+// proxyBufPool implements [httputil.BufferPool]
+type proxyBufPool struct {
+	pool sync.Pool
+}
+
+func newProxyBufPool() *proxyBufPool {
+	return &proxyBufPool{
+		pool: sync.Pool{
+			New: func() any {
+				// Match net/http/httputil default copyBuffer size.
+				b := make([]byte, proxyBufferSize)
+				return &b
+			},
+		},
+	}
+}
+
+func (p *proxyBufPool) Get() []byte {
+	bp := p.pool.Get().(*[]byte)
+	return *bp
+}
+
+func (p *proxyBufPool) Put(b []byte) {
+	if cap(b) != proxyBufferSize {
+		return
+	}
+	b = b[:cap(b)]
+	bp := new([]byte)
+	*bp = b
+	p.pool.Put(bp)
 }
