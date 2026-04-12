@@ -23,6 +23,8 @@ const (
 	annAuthMode                = "ingress.lds.li/auth-mode"
 	annOIDCIssuer              = "ingress.lds.li/oidc-issuer"
 	annOIDCDynamicClient       = "ingress.lds.li/oidc-dynamic-client"
+	annOIDCClientID            = "ingress.lds.li/oidc-client-id"
+	annOIDCClientSecret        = "ingress.lds.li/oidc-client-secret"
 	annOIDCUsernameHeader      = "ingress.lds.li/oidc-preferred-username-header"
 	annOIDCEmailHeader         = "ingress.lds.li/oidc-email-header"
 	annOIDCBypassPatterns      = "ingress.lds.li/oidc-bypass-patterns"
@@ -92,12 +94,6 @@ func (s *ServiceReconciler) Reconcile(ctx context.Context, req reconcile.Request
 
 	var oidcCfg *oidcConfig
 	if mode == modeHTTPS && strings.EqualFold(svc.Annotations[annAuthMode], authModeOIDC) {
-		if !strings.EqualFold(svc.Annotations[annOIDCDynamicClient], "true") {
-			s.logger.Info("ignoring service: oidc auth requires dynamic client registration",
-				"name", req.Name, "namespace", req.Namespace)
-			s.router.RemoveRoute(req.NamespacedName)
-			return reconcile.Result{}, nil
-		}
 		issuer := strings.TrimSpace(svc.Annotations[annOIDCIssuer])
 		if issuer == "" {
 			s.logger.Info("ignoring service: missing oidc issuer for auth mode OIDC",
@@ -105,8 +101,22 @@ func (s *ServiceReconciler) Reconcile(ctx context.Context, req reconcile.Request
 			s.router.RemoveRoute(req.NamespacedName)
 			return reconcile.Result{}, nil
 		}
+
+		clientID := strings.TrimSpace(svc.Annotations[annOIDCClientID])
+		clientSecret := strings.TrimSpace(svc.Annotations[annOIDCClientSecret])
+		dynamic := strings.EqualFold(svc.Annotations[annOIDCDynamicClient], "true")
+
+		if !dynamic && (clientID == "" || clientSecret == "") {
+			s.logger.Info("ignoring service: oidc auth requires dynamic client registration or explicit client id/secret",
+				"name", req.Name, "namespace", req.Namespace)
+			s.router.RemoveRoute(req.NamespacedName)
+			return reconcile.Result{}, nil
+		}
+
 		oidcCfg = &oidcConfig{
 			Issuer:         issuer,
+			ClientID:       clientID,
+			ClientSecret:   clientSecret,
 			UsernameHeader: strings.TrimSpace(svc.Annotations[annOIDCUsernameHeader]),
 			EmailHeader:    strings.TrimSpace(svc.Annotations[annOIDCEmailHeader]),
 			BypassPatterns: splitCSV(svc.Annotations[annOIDCBypassPatterns]),

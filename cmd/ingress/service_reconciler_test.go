@@ -212,3 +212,58 @@ func TestServiceReconcileOIDCConfigValidation(t *testing.T) {
 		t.Fatalf("expected bypass patterns to be parsed, got %v", route.OIDC.BypassPatterns)
 	}
 }
+
+func TestServiceReconcileOIDCExplicitConfig(t *testing.T) {
+	ctx := context.Background()
+	router := newIngressRouter(testLogger(), ctx, nil)
+	router.authMiddlewareBuilder = func(_ context.Context, _ string, _ oidcConfig) (func(http.Handler) http.Handler, error) {
+		return func(h http.Handler) http.Handler { return h }, nil
+	}
+	r := &ServiceReconciler{
+		logger:   testLogger(),
+		router:   router,
+		instance: "ingress1",
+	}
+
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "backend-https-auth-explicit",
+			Namespace: "default",
+			Labels: map[string]string{
+				labelIngressInstance: "ingress1",
+			},
+			Annotations: map[string]string{
+				annMode:             modeHTTPS,
+				annHTTPHostnames:     "auth-explicit.example.com",
+				annAuthMode:          authModeOIDC,
+				annOIDCIssuer:        "https://issuer.example.com",
+				annOIDCClientID:      "my-client-id",
+				annOIDCClientSecret:  "my-client-secret",
+			},
+		},
+		Spec: corev1.ServiceSpec{
+			ClusterIP: "10.0.0.98",
+			Ports: []corev1.ServicePort{
+				{Port: 8080},
+			},
+		},
+	}
+	r.Client = fake.NewClientBuilder().WithScheme(scheme).WithObjects(svc).Build()
+
+	if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: svc.Name}}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	route, ok := router.RouteFor("auth-explicit.example.com")
+	if !ok {
+		t.Fatalf("expected route when oidc explicit config is provided")
+	}
+	if route.OIDC == nil {
+		t.Fatalf("expected OIDC config to be set")
+	}
+	if route.OIDC.ClientID != "my-client-id" {
+		t.Fatalf("expected client ID to be 'my-client-id', got '%s'", route.OIDC.ClientID)
+	}
+	if route.OIDC.ClientSecret != "my-client-secret" {
+		t.Fatalf("expected client secret to be 'my-client-secret', got '%s'", route.OIDC.ClientSecret)
+	}
+}

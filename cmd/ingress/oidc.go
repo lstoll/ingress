@@ -27,6 +27,9 @@ type oidcConfig struct {
 	EmailHeader    string
 	BypassPatterns []string
 	RequireGroup   string
+
+	ClientID     string
+	ClientSecret string
 }
 
 func buildMiddlewareForHost(ctx context.Context, incomingHostname string, cfg oidcConfig) (func(http.Handler) http.Handler, error) {
@@ -93,12 +96,20 @@ func buildMiddlewareForHost(ctx context.Context, incomingHostname string, cfg oi
 		}
 		slog.Info("oidc: refreshing middleware", "hostname", incomingHostname, "issuer", cfg.Issuer)
 
-		// Always re-register: middleware construction doesn't validate
-		// credentials (they're only used at token exchange time), so we
-		// can't detect stale creds by retrying the build.
-		clientID, clientSecret, err := oidcClientCredentials(ctx, cfg, incomingHostname, redirectURL)
-		if err != nil {
-			return err
+		var (
+			clientID     = cfg.ClientID
+			clientSecret = cfg.ClientSecret
+			err          error
+		)
+
+		if clientID == "" || clientSecret == "" {
+			// Always re-register: middleware construction doesn't validate
+			// credentials (they're only used at token exchange time), so we
+			// can't detect stale creds by retrying the build.
+			clientID, clientSecret, err = oidcClientCredentials(ctx, cfg, incomingHostname, redirectURL)
+			if err != nil {
+				return err
+			}
 		}
 
 		mw, err := buildMw(clientID, clientSecret)
