@@ -54,6 +54,62 @@ func NewTestFixture(t *testing.T) TestFixture {
 	}
 }
 
+// ClientIdentity returns separate-file identity paths for this fixture.
+func (f TestFixture) ClientIdentity() IdentityFiles {
+	return IdentityFiles{CertFile: f.ClientCert, KeyFile: f.ClientKey}
+}
+
+// ServerIdentity returns separate-file identity paths for this fixture.
+func (f TestFixture) ServerIdentity() IdentityFiles {
+	return IdentityFiles{CertFile: f.ServerCert, KeyFile: f.ServerKey}
+}
+
+// ClientBundleFile writes a Kubernetes-style credential bundle and returns its path.
+func (f TestFixture) ClientBundleFile(t *testing.T) string {
+	t.Helper()
+	return writeCredentialBundle(t, f.ClientKey, f.ClientCert)
+}
+
+// ServerBundleFile writes a Kubernetes-style credential bundle and returns its path.
+func (f TestFixture) ServerBundleFile(t *testing.T) string {
+	t.Helper()
+	return writeCredentialBundle(t, f.ServerKey, f.ServerCert)
+}
+
+func writeCredentialBundle(t *testing.T, keyFile, certFile string) string {
+	t.Helper()
+	keyPEM, err := os.ReadFile(keyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyBlock, _ := pem.Decode(keyPEM)
+	if keyBlock == nil {
+		t.Fatal("failed to decode key PEM")
+	}
+	privateKey, err := x509.ParseECPrivateKey(keyBlock.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkcs8DER, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	certPEM, err := os.ReadFile(certFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(filepath.Dir(keyFile), "bundle.pem")
+	var bundle []byte
+	bundle = append(bundle, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: pkcs8DER})...)
+	bundle = append(bundle, certPEM...)
+	if err := os.WriteFile(path, bundle, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 // RotateClientCert replaces the client certificate files with a new leaf from the same CA.
 func (f *TestFixture) RotateClientCert(t *testing.T) {
 	t.Helper()

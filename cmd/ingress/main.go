@@ -62,9 +62,10 @@ func main() {
 		watchNamespace          = fs.String("watch-namespace", "", "Optional namespace to watch services in. Empty means all namespaces")
 		certMode                = fs.String("cert-mode", certModeSelfSigned, "Certificate mode for terminated TLS routes: self-signed or autocert")
 		autocertSecret          = fs.String("autocert-secret", "", "namespace/name secret for autocert cache (required when --cert-mode=autocert)")
-		backendMTLSClientCert   = fs.String("backend-mtls-client-cert", "", "Client certificate file for backend mTLS dialing")
-		backendMTLSClientKey    = fs.String("backend-mtls-client-key", "", "Client private key file for backend mTLS dialing")
-		backendMTLSCA           = fs.String("backend-mtls-ca", "", "CA bundle for verifying backend mTLS server certificates")
+		backendMTLSClientCert    = fs.String("backend-mtls-client-cert", "", "Client certificate file for backend mTLS dialing")
+		backendMTLSClientKey     = fs.String("backend-mtls-client-key", "", "Client private key file for backend mTLS dialing")
+		backendMTLSClientBundle  = fs.String("backend-mtls-client-bundle", "", "Client credential bundle file for backend mTLS dialing (Kubernetes pod certificate format)")
+		backendMTLSCA            = fs.String("backend-mtls-ca", "", "CA bundle for verifying backend mTLS server certificates")
 		backendMTLSReloadInterval = fs.Duration("backend-mtls-reload-interval", mtls.DefaultReloadInterval, "How often to reload backend mTLS certificate files from disk")
 		metricsListen           = fs.String("metrics-listen", ":9090", "Metrics server listen address (set to 0 to disable)")
 		healthListen            = fs.String("health-listen", ":8080", "Health probe listen address (set to 0 to disable)")
@@ -102,7 +103,7 @@ func main() {
 	logf.SetLogger(logr.FromSlogHandler(appLogger.With("component", "controller-runtime").Handler()))
 
 	log := appLogger.With("component", "ingress")
-	if err := validateStartupConfig(*instance, *certMode, *autocertSecret, *backendMTLSClientCert, *backendMTLSClientKey, *backendMTLSCA); err != nil {
+	if err := validateStartupConfig(*instance, *certMode, *autocertSecret, *backendMTLSClientCert, *backendMTLSClientKey, *backendMTLSClientBundle, *backendMTLSCA); err != nil {
 		log.Error("invalid startup configuration", "error", err)
 		os.Exit(2)
 	}
@@ -144,11 +145,14 @@ func main() {
 	ir = newIngressRouter(log.With("component", "ingress-router"), ctx, cp)
 
 	var backendMTLSReloader *mtls.Reloader
-	if *backendMTLSClientCert != "" || *backendMTLSClientKey != "" || *backendMTLSCA != "" {
+	if backendMTLSConfigured(*backendMTLSClientCert, *backendMTLSClientKey, *backendMTLSClientBundle, *backendMTLSCA) {
 		reloader, err := mtls.NewClientReloader(
 			log.With("component", "backend-mtls"),
-			*backendMTLSClientCert,
-			*backendMTLSClientKey,
+			mtls.IdentityFiles{
+				BundleFile: *backendMTLSClientBundle,
+				CertFile:   *backendMTLSClientCert,
+				KeyFile:    *backendMTLSClientKey,
+			},
 			*backendMTLSCA,
 			*backendMTLSReloadInterval,
 		)
@@ -359,7 +363,7 @@ func readVersion() string {
 	return strings.Join(parts, " ")
 }
 
-func validateStartupConfig(instance, certMode, autocertSecret, backendMTLSClientCert, backendMTLSClientKey, backendMTLSCA string) error {
+func validateStartupConfig(instance, certMode, autocertSecret, backendMTLSClientCert, backendMTLSClientKey, backendMTLSClientBundle, backendMTLSCA string) error {
 	if instance == "" {
 		return fmt.Errorf("--instance must be set")
 	}
@@ -371,7 +375,7 @@ func validateStartupConfig(instance, certMode, autocertSecret, backendMTLSClient
 			return fmt.Errorf("invalid --autocert-secret, expected namespace/name: %w", err)
 		}
 	}
-	if err := validateBackendMTLSFlags(backendMTLSClientCert, backendMTLSClientKey, backendMTLSCA); err != nil {
+	if err := validateBackendMTLSFlags(backendMTLSClientCert, backendMTLSClientKey, backendMTLSClientBundle, backendMTLSCA); err != nil {
 		return err
 	}
 	return nil

@@ -2,20 +2,18 @@ package mtls
 
 import (
 	"crypto/tls"
-	"crypto/x509"
 	"fmt"
-	"os"
 )
 
 // ClientConfig loads a client certificate and optional CA pool for verifying
 // backend server certificates.
-func ClientConfig(certFile, keyFile, caFile string) (*tls.Config, error) {
-	if certFile == "" || keyFile == "" {
-		return nil, fmt.Errorf("client cert and key paths are required")
+func ClientConfig(identity IdentityFiles, caFile string) (*tls.Config, error) {
+	if err := identity.Validate(); err != nil {
+		return nil, err
 	}
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	cert, err := identity.Load()
 	if err != nil {
-		return nil, fmt.Errorf("loading client certificate: %w", err)
+		return nil, err
 	}
 
 	cfg := &tls.Config{
@@ -37,17 +35,17 @@ func ClientConfig(certFile, keyFile, caFile string) (*tls.Config, error) {
 // ServerConfig loads a server certificate and requires client certificates signed
 // by the given CA. expectedClientSVID, when non-empty, must appear as a URI SAN
 // on the client certificate.
-func ServerConfig(certFile, keyFile, clientCAFile, expectedClientSVID string) (*tls.Config, error) {
-	if certFile == "" || keyFile == "" {
-		return nil, fmt.Errorf("server cert and key paths are required")
+func ServerConfig(identity IdentityFiles, clientCAFile, expectedClientSVID string) (*tls.Config, error) {
+	if err := identity.Validate(); err != nil {
+		return nil, err
 	}
 	if clientCAFile == "" {
 		return nil, fmt.Errorf("client CA path is required")
 	}
 
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	cert, err := identity.Load()
 	if err != nil {
-		return nil, fmt.Errorf("loading server certificate: %w", err)
+		return nil, err
 	}
 	clientCAs, err := loadCAPool(clientCAFile)
 	if err != nil {
@@ -72,16 +70,4 @@ func ServerConfig(certFile, keyFile, clientCAFile, expectedClientSVID string) (*
 	}
 
 	return cfg, nil
-}
-
-func loadCAPool(caFile string) (*x509.CertPool, error) {
-	pem, err := os.ReadFile(caFile)
-	if err != nil {
-		return nil, fmt.Errorf("reading CA file %s: %w", caFile, err)
-	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(pem) {
-		return nil, fmt.Errorf("no certificates found in CA file %s", caFile)
-	}
-	return pool, nil
 }

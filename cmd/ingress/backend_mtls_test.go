@@ -68,7 +68,7 @@ func TestBackendMTLSRejectsWrongSVID(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = plainLn.Close() })
 
-	serverCfg, err := mtls.ServerConfig(fix.ServerCert, fix.ServerKey, fix.CAFile, fix.WrongSVID)
+	serverCfg, err := mtls.ServerConfig(fix.ServerIdentity(), fix.CAFile, fix.WrongSVID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,16 +137,28 @@ func TestServiceReconcileBackendMTLSConfigured(t *testing.T) {
 	}
 }
 
-func TestValidateBackendMTLSFlags(t *testing.T) {
-	if err := validateBackendMTLSFlags("", "", ""); err != nil {
-		t.Fatalf("expected nil for unset flags: %v", err)
+func TestBackendMTLSClientCredentialBundle(t *testing.T) {
+	fix := mtls.NewTestFixture(t)
+	bundle := fix.ClientBundleFile(t)
+
+	reloader, err := mtls.NewClientReloader(testLogger(), mtls.IdentityFiles{BundleFile: bundle}, fix.CAFile, time.Hour)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := validateBackendMTLSFlags("cert", "key", "ca"); err != nil {
-		t.Fatalf("expected nil for all flags: %v", err)
+	dialer := newBackendDialer(reloader)
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(backend.Close)
+
+	sidecarLn := startTestSidecar(t, fix, backend.Listener.Addr().String())
+
+	conn, err := dialer.DialContext(context.Background(), "tcp", sidecarLn.Addr().String(), "backend-sidecar", true)
+	if err != nil {
+		t.Fatalf("dial with bundle identity: %v", err)
 	}
-	if err := validateBackendMTLSFlags("cert", "", ""); err == nil {
-		t.Fatal("expected error for partial flags")
-	}
+	_ = conn.Close()
 }
 
 func backendMTLSTestService(name string, backendMTLS bool) *corev1.Service {
@@ -183,7 +195,7 @@ func startTestSidecar(t *testing.T, fix mtls.TestFixture, forwardAddr string) ne
 		t.Fatal(err)
 	}
 
-	serverCfg, err := mtls.ServerConfig(fix.ServerCert, fix.ServerKey, fix.CAFile, fix.IngressSVID)
+	serverCfg, err := mtls.ServerConfig(fix.ServerIdentity(), fix.CAFile, fix.IngressSVID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +244,7 @@ func proxySidecarConn(logger *slog.Logger, client net.Conn, forwardAddr string) 
 
 func newTestBackendDialer(t *testing.T, fix mtls.TestFixture) *backendDialer {
 	t.Helper()
-	reloader, err := mtls.NewClientReloader(testLogger(), fix.ClientCert, fix.ClientKey, fix.CAFile, time.Hour)
+	reloader, err := mtls.NewClientReloader(testLogger(), fix.ClientIdentity(), fix.CAFile, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +253,7 @@ func newTestBackendDialer(t *testing.T, fix mtls.TestFixture) *backendDialer {
 
 func TestBackendMTLSReloaderPicksUpRotatedClientCert(t *testing.T) {
 	fix := mtls.NewTestFixture(t)
-	reloader, err := mtls.NewClientReloader(testLogger(), fix.ClientCert, fix.ClientKey, fix.CAFile, time.Hour)
+	reloader, err := mtls.NewClientReloader(testLogger(), fix.ClientIdentity(), fix.CAFile, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}

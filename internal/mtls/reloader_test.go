@@ -11,7 +11,7 @@ import (
 
 func TestReloaderReloadOnceAfterRotateClient(t *testing.T) {
 	fix := mtls.NewTestFixture(t)
-	reloader, err := mtls.NewClientReloader(testLogger(), fix.ClientCert, fix.ClientKey, fix.CAFile, time.Hour)
+	reloader, err := mtls.NewClientReloader(testLogger(), fix.ClientIdentity(), fix.CAFile, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -24,7 +24,7 @@ func TestReloaderReloadOnceAfterRotateClient(t *testing.T) {
 
 func TestReloaderReloadOnceAfterRotateServer(t *testing.T) {
 	fix := mtls.NewTestFixture(t)
-	reloader, err := mtls.NewServerReloader(testLogger(), fix.ServerCert, fix.ServerKey, fix.CAFile, fix.IngressSVID, time.Hour)
+	reloader, err := mtls.NewServerReloader(testLogger(), fix.ServerIdentity(), fix.CAFile, fix.IngressSVID, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +37,7 @@ func TestReloaderReloadOnceAfterRotateServer(t *testing.T) {
 
 func TestReloaderKeepsPreviousMaterialOnBadReload(t *testing.T) {
 	fix := mtls.NewTestFixture(t)
-	reloader, err := mtls.NewClientReloader(testLogger(), fix.ClientCert, fix.ClientKey, fix.CAFile, time.Hour)
+	reloader, err := mtls.NewClientReloader(testLogger(), fix.ClientIdentity(), fix.CAFile, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestReloaderKeepsPreviousMaterialOnBadReload(t *testing.T) {
 
 func TestReloaderReloadOnceNoOpWhenUnchanged(t *testing.T) {
 	fix := mtls.NewTestFixture(t)
-	reloader, err := mtls.NewClientReloader(testLogger(), fix.ClientCert, fix.ClientKey, fix.CAFile, time.Hour)
+	reloader, err := mtls.NewClientReloader(testLogger(), fix.ClientIdentity(), fix.CAFile, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}

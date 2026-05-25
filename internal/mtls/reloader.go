@@ -27,8 +27,7 @@ type Reloader struct {
 	role               reloaderRole
 	logger             *slog.Logger
 	interval           time.Duration
-	certFile           string
-	keyFile            string
+	identity           IdentityFiles
 	caFile             string
 	expectedClientSVID string
 
@@ -43,13 +42,12 @@ type Reloader struct {
 }
 
 type fileFingerprint struct {
-	cert [sha256.Size]byte
-	key  [sha256.Size]byte
-	ca   [sha256.Size]byte
+	identity [sha256.Size]byte
+	ca       [sha256.Size]byte
 }
 
 // NewClientReloader loads client certificate material and returns a reloader.
-func NewClientReloader(logger *slog.Logger, certFile, keyFile, caFile string, interval time.Duration) (*Reloader, error) {
+func NewClientReloader(logger *slog.Logger, identity IdentityFiles, caFile string, interval time.Duration) (*Reloader, error) {
 	if interval <= 0 {
 		interval = DefaultReloadInterval
 	}
@@ -57,9 +55,8 @@ func NewClientReloader(logger *slog.Logger, certFile, keyFile, caFile string, in
 		role:     reloaderClient,
 		logger:   logger,
 		interval: interval,
-		certFile: certFile,
-		keyFile:  keyFile,
-		caFile:   caFile,
+		identity: identity,
+		caFile:     caFile,
 	}
 	if err := r.reload(true); err != nil {
 		return nil, err
@@ -68,7 +65,7 @@ func NewClientReloader(logger *slog.Logger, certFile, keyFile, caFile string, in
 }
 
 // NewServerReloader loads server certificate material and returns a reloader.
-func NewServerReloader(logger *slog.Logger, certFile, keyFile, clientCAFile, expectedClientSVID string, interval time.Duration) (*Reloader, error) {
+func NewServerReloader(logger *slog.Logger, identity IdentityFiles, clientCAFile, expectedClientSVID string, interval time.Duration) (*Reloader, error) {
 	if interval <= 0 {
 		interval = DefaultReloadInterval
 	}
@@ -76,8 +73,7 @@ func NewServerReloader(logger *slog.Logger, certFile, keyFile, clientCAFile, exp
 		role:               reloaderServer,
 		logger:             logger,
 		interval:           interval,
-		certFile:           certFile,
-		keyFile:            keyFile,
+		identity:           identity,
 		caFile:             clientCAFile,
 		expectedClientSVID: expectedClientSVID,
 	}
@@ -168,7 +164,7 @@ func (r *Reloader) ReloadOnce() error {
 }
 
 func (r *Reloader) reload(initial bool) error {
-	fp, err := fingerprintFiles(r.certFile, r.keyFile, r.caFile)
+	fp, err := fingerprintCredentials(r.identity, r.caFile)
 	if err != nil {
 		return err
 	}
@@ -180,9 +176,9 @@ func (r *Reloader) reload(initial bool) error {
 		return nil
 	}
 
-	cert, err := tls.LoadX509KeyPair(r.certFile, r.keyFile)
+	cert, err := r.identity.Load()
 	if err != nil {
-		return fmt.Errorf("loading certificate: %w", err)
+		return fmt.Errorf("loading identity credential: %w", err)
 	}
 	pool, err := loadCAPool(r.caFile)
 	if err != nil {
@@ -204,33 +200,46 @@ func (r *Reloader) reload(initial bool) error {
 	r.mu.Unlock()
 
 	if !initial {
-		r.logger.Info("reloaded TLS certificate material",
-			"cert", r.certFile,
-			"key", r.keyFile,
-			"ca", r.caFile,
-		)
+		attrs := []any{"ca", r.caFile}
+		if r.identity.BundleFile != "" {
+			attrs = append([]any{"bundle", r.identity.BundleFile}, attrs...)
+		} else {
+			attrs = append([]any{"cert", r.identity.CertFile, "key", r.identity.KeyFile}, attrs...)
+		}
+		r.logger.Info("reloaded TLS certificate material", attrs...)
 	}
 	return nil
 }
 
-func fingerprintFiles(certFile, keyFile, caFile string) (fileFingerprint, error) {
+func fingerprintCredentials(identity IdentityFiles, caFile string) (fileFingerprint, error) {
 	var fp fileFingerprint
-	certSum, err := hashFile(certFile)
+	identitySum, err := fingerprintIdentity(identity)
 	if err != nil {
-		return fp, fmt.Errorf("hashing cert file: %w", err)
-	}
-	keySum, err := hashFile(keyFile)
-	if err != nil {
-		return fp, fmt.Errorf("hashing key file: %w", err)
+		return fp, err
 	}
 	caSum, err := hashFile(caFile)
 	if err != nil {
 		return fp, fmt.Errorf("hashing ca file: %w", err)
 	}
-	copy(fp.cert[:], certSum)
-	copy(fp.key[:], keySum)
+	copy(fp.identity[:], identitySum)
 	copy(fp.ca[:], caSum)
 	return fp, nil
+}
+
+func fingerprintIdentity(identity IdentityFiles) ([]byte, error) {
+	if identity.BundleFile != "" {
+		return hashFile(identity.BundleFile)
+	}
+	certSum, err := hashFile(identity.CertFile)
+	if err != nil {
+		return nil, fmt.Errorf("hashing cert file: %w", err)
+	}
+	keySum, err := hashFile(identity.KeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("hashing key file: %w", err)
+	}
+	sum := sha256.Sum256(append(certSum, keySum...))
+	return sum[:], nil
 }
 
 func hashFile(path string) ([]byte, error) {
@@ -240,4 +249,16 @@ func hashFile(path string) ([]byte, error) {
 	}
 	sum := sha256.Sum256(data)
 	return sum[:], nil
+}
+
+func loadCAPool(caFile string) (*x509.CertPool, error) {
+	pem, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, fmt.Errorf("reading CA file %s: %w", caFile, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("no certificates found in CA file %s", caFile)
+	}
+	return pool, nil
 }

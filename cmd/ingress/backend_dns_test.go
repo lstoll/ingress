@@ -26,7 +26,7 @@ func TestBackendMTLSRejectsWrongServerName(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = plainLn.Close() })
 
-	serverCfg, err := mtls.ServerConfig(fix.ServerCert, fix.ServerKey, fix.CAFile, fix.IngressSVID)
+	serverCfg, err := mtls.ServerConfig(fix.ServerIdentity(), fix.CAFile, fix.IngressSVID)
 	if err != nil {
 		t.Fatal(err)
 	}

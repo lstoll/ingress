@@ -18,16 +18,8 @@ import (
 
 func main() {
 	fs := flag.NewFlagSet("backendsidecar", flag.ExitOnError)
-	listen := fs.String("listen", "0.0.0.0:9443", "mTLS listen address")
-	forward := fs.String("forward", "127.0.0.1:8080", "Address to forward verified connections to")
-	expectedClientSVID := fs.String("expected-client-svid", "", "Required SPIFFE URI SAN on ingress client certificate")
-	serverCert := fs.String("server-cert", "", "Server certificate file")
-	serverKey := fs.String("server-key", "", "Server private key file")
-	clientCA := fs.String("client-ca", "", "CA bundle for verifying client certificates")
-	certReloadInterval := fs.Duration("cert-reload-interval", mtls.DefaultReloadInterval, "How often to reload certificate files from disk")
-	logLevel := fs.String("log-level", envOrDefault("BACKEND_SIDECAR_LOG_LEVEL", "info"), "Log level: debug, info, warn, error")
-
-	if err := fs.Parse(os.Args[1:]); err != nil {
+	listen, forward, expectedClientSVID, serverCert, serverKey, serverBundle, clientCA, certReloadInterval, logLevel, err := parseSidecarFlags(fs)
+	if err != nil {
 		os.Exit(2)
 	}
 
@@ -37,15 +29,15 @@ func main() {
 		os.Exit(2)
 	}
 
-	if *expectedClientSVID == "" {
-		logger.Error("missing required flag", "flag", "expected-client-svid")
+	identity := serverIdentityFromFlags(serverCert, serverKey, serverBundle)
+	if err := validateSidecarStartup(*expectedClientSVID, identity); err != nil {
+		logger.Error("invalid startup configuration", "error", err)
 		os.Exit(2)
 	}
 
 	reloader, err := mtls.NewServerReloader(
 		logger.With("component", "cert-reloader"),
-		*serverCert,
-		*serverKey,
+		identity,
 		*clientCA,
 		*expectedClientSVID,
 		*certReloadInterval,

@@ -36,7 +36,7 @@ func TestVerifyClientSVID(t *testing.T) {
 func TestClientAndServerConfig(t *testing.T) {
 	fix := mtls.NewTestFixture(t)
 
-	clientCfg, err := mtls.ClientConfig(fix.ClientCert, fix.ClientKey, fix.CAFile)
+	clientCfg, err := mtls.ClientConfig(fix.ClientIdentity(), fix.CAFile)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func TestClientAndServerConfig(t *testing.T) {
 		t.Fatalf("expected one client certificate, got %d", len(clientCfg.Certificates))
 	}
 
-	serverCfg, err := mtls.ServerConfig(fix.ServerCert, fix.ServerKey, fix.CAFile, fix.IngressSVID)
+	serverCfg, err := mtls.ServerConfig(fix.ServerIdentity(), fix.CAFile, fix.IngressSVID)
 	if err != nil {
 		t.Fatal(err)
 	}
