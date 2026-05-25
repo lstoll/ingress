@@ -40,11 +40,7 @@ func TestBackendMTLSRejectsWrongServerName(t *testing.T) {
 		_ = conn.Close()
 	}()
 
-	clientCfg, err := mtls.ClientConfig(fix.ClientCert, fix.ClientKey, fix.CAFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dialer := newBackendDialer(clientCfg)
+	dialer := newTestBackendDialer(t, fix)
 
 	_, err = dialer.DialContext(context.Background(), "tcp", ln.Addr().String(), "wrong.example.test", true)
 	if err == nil {

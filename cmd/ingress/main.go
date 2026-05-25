@@ -20,6 +20,8 @@ import (
 	"inet.af/tcpproxy"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/rest"
+
+	"github.com/lstoll/ingress/internal/mtls"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
@@ -63,6 +65,7 @@ func main() {
 		backendMTLSClientCert   = fs.String("backend-mtls-client-cert", "", "Client certificate file for backend mTLS dialing")
 		backendMTLSClientKey    = fs.String("backend-mtls-client-key", "", "Client private key file for backend mTLS dialing")
 		backendMTLSCA           = fs.String("backend-mtls-ca", "", "CA bundle for verifying backend mTLS server certificates")
+		backendMTLSReloadInterval = fs.Duration("backend-mtls-reload-interval", mtls.DefaultReloadInterval, "How often to reload backend mTLS certificate files from disk")
 		metricsListen           = fs.String("metrics-listen", ":9090", "Metrics server listen address (set to 0 to disable)")
 		healthListen            = fs.String("health-listen", ":8080", "Health probe listen address (set to 0 to disable)")
 		logLevel                = fs.String("log-level", envOrDefault("INGRESS_LOG_LEVEL", "info"), "Log level: debug, info, warn, error")
@@ -140,14 +143,22 @@ func main() {
 	// TLS front: SNI index + per-Service bindings (see router.go model).
 	ir = newIngressRouter(log.With("component", "ingress-router"), ctx, cp)
 
+	var backendMTLSReloader *mtls.Reloader
 	if *backendMTLSClientCert != "" || *backendMTLSClientKey != "" || *backendMTLSCA != "" {
-		tlsCfg, err := loadBackendMTLSClientConfig(*backendMTLSClientCert, *backendMTLSClientKey, *backendMTLSCA)
+		reloader, err := mtls.NewClientReloader(
+			log.With("component", "backend-mtls"),
+			*backendMTLSClientCert,
+			*backendMTLSClientKey,
+			*backendMTLSCA,
+			*backendMTLSReloadInterval,
+		)
 		if err != nil {
 			log.Error("loading backend mTLS client config", "error", err)
 			os.Exit(1)
 		}
-		ir.backendDialer = newBackendDialer(tlsCfg)
-		log.Info("backend mTLS client configured")
+		backendMTLSReloader = reloader
+		ir.backendDialer = newBackendDialer(reloader)
+		log.Info("backend mTLS client configured", "reload_interval", (*backendMTLSReloadInterval).String())
 	}
 
 	healthInternalAddr := *healthListen
@@ -193,6 +204,9 @@ func main() {
 		}
 	}
 	proxyContext, proxyCancel := context.WithCancel(ctx)
+	if backendMTLSReloader != nil {
+		backendMTLSReloader.Start(proxyContext)
+	}
 	g.Add(func() error {
 		log.Info("starting TLS proxy listener", "addr", *tlsListen)
 		p.AddSNIMatchRoute(*tlsListen, ir.matchSNI, ir)

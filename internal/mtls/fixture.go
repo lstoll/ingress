@@ -24,6 +24,9 @@ type TestFixture struct {
 	ClientKey   string
 	IngressSVID string
 	WrongSVID   string
+
+	ca    *x509.Certificate
+	caKey *ecdsa.PrivateKey
 }
 
 // NewTestFixture generates a temporary CA, server cert, and client cert with a SPIFFE URI SAN.
@@ -46,7 +49,29 @@ func NewTestFixture(t *testing.T) TestFixture {
 		ClientKey:   writeKeyPEM(t, dir, "client-key.pem", clientKey),
 		IngressSVID: ingressSVID,
 		WrongSVID:   wrongSVID,
+		ca:          caCert,
+		caKey:       caKey,
 	}
+}
+
+// RotateClientCert replaces the client certificate files with a new leaf from the same CA.
+func (f *TestFixture) RotateClientCert(t *testing.T) {
+	t.Helper()
+	clientKey, clientCert := newLeaf(t, f.ca, f.caKey, leafOptions{spiffeID: f.IngressSVID, isClient: true})
+	if err := os.WriteFile(f.ClientCert, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: clientCert.Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeKeyToFile(t, f.ClientKey, clientKey)
+}
+
+// RotateServerCert replaces the server certificate files with a new leaf from the same CA.
+func (f *TestFixture) RotateServerCert(t *testing.T) {
+	t.Helper()
+	serverKey, serverCert := newLeaf(t, f.ca, f.caKey, leafOptions{dnsName: "backend-sidecar", isServer: true})
+	if err := os.WriteFile(f.ServerCert, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: serverCert.Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeKeyToFile(t, f.ServerKey, serverKey)
 }
 
 type leafOptions struct {
@@ -135,13 +160,18 @@ func writeCertPEM(t *testing.T, dir, name string, der []byte) string {
 
 func writeKeyPEM(t *testing.T, dir, name string, key *ecdsa.PrivateKey) string {
 	t.Helper()
+	path := filepath.Join(dir, name)
+	writeKeyToFile(t, path, key)
+	return path
+}
+
+func writeKeyToFile(t *testing.T, path string, key *ecdsa.PrivateKey) {
+	t.Helper()
 	der, err := x509.MarshalECPrivateKey(key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(dir, name)
 	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der}), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return path
 }

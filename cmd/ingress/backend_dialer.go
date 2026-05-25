@@ -5,22 +5,24 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
+
+	"github.com/lstoll/ingress/internal/mtls"
 )
 
 type backendDialer struct {
-	tlsConfig *tls.Config
+	reloader *mtls.Reloader
 }
 
-func newBackendDialer(tlsConfig *tls.Config) *backendDialer {
-	return &backendDialer{tlsConfig: tlsConfig}
+func newBackendDialer(reloader *mtls.Reloader) *backendDialer {
+	return &backendDialer{reloader: reloader}
 }
 
 func (d *backendDialer) enabled() bool {
-	return d != nil && d.tlsConfig != nil
+	return d != nil && d.reloader != nil
 }
 
-func (d *backendDialer) DialContext(ctx context.Context, network, address, serverName string, mtls bool) (net.Conn, error) {
-	if !mtls || d == nil || d.tlsConfig == nil {
+func (d *backendDialer) DialContext(ctx context.Context, network, address, serverName string, mtlsEnabled bool) (net.Conn, error) {
+	if !mtlsEnabled || d == nil || d.reloader == nil {
 		var dialer net.Dialer
 		return dialer.DialContext(ctx, network, address)
 	}
@@ -33,9 +35,7 @@ func (d *backendDialer) DialContext(ctx context.Context, network, address, serve
 		return nil, err
 	}
 
-	cfg := d.tlsConfig.Clone()
-	cfg.ServerName = serverName
-	conn := tls.Client(raw, cfg)
+	conn := tls.Client(raw, d.reloader.ClientTLSConfig(serverName))
 	if err := conn.HandshakeContext(ctx); err != nil {
 		_ = raw.Close()
 		return nil, fmt.Errorf("backend mTLS handshake: %w", err)

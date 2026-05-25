@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -31,11 +32,7 @@ func TestBackendMTLSTunnel(t *testing.T) {
 
 	sidecarLn := startTestSidecar(t, fix, backend.Listener.Addr().String())
 
-	clientCfg, err := mtls.ClientConfig(fix.ClientCert, fix.ClientKey, fix.CAFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dialer := newBackendDialer(clientCfg)
+	dialer := newTestBackendDialer(t, fix)
 
 	conn, err := dialer.DialContext(context.Background(), "tcp", sidecarLn.Addr().String(), "backend-sidecar", true)
 	if err != nil {
@@ -85,11 +82,7 @@ func TestBackendMTLSRejectsWrongSVID(t *testing.T) {
 		_ = conn.Close()
 	}()
 
-	clientCfg, err := mtls.ClientConfig(fix.ClientCert, fix.ClientKey, fix.CAFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dialer := newBackendDialer(clientCfg)
+	dialer := newTestBackendDialer(t, fix)
 
 	_, err = dialer.DialContext(context.Background(), "tcp", ln.Addr().String(), "backend-sidecar", true)
 	if err == nil {
@@ -120,13 +113,9 @@ func TestServiceReconcileBackendMTLSRequiresIngressConfig(t *testing.T) {
 func TestServiceReconcileBackendMTLSConfigured(t *testing.T) {
 	ctx := context.Background()
 	fix := mtls.NewTestFixture(t)
-	clientCfg, err := mtls.ClientConfig(fix.ClientCert, fix.ClientKey, fix.CAFile)
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	router := newIngressRouter(testLogger(), ctx, nil)
-	router.backendDialer = newBackendDialer(clientCfg)
+	router.backendDialer = newTestBackendDialer(t, fix)
 	r := &ServiceReconciler{
 		logger:   testLogger(),
 		router:   router,
@@ -239,4 +228,48 @@ func proxySidecarConn(logger *slog.Logger, client net.Conn, forwardAddr string) 
 		_, _ = io.Copy(client, upstream)
 	}()
 	wg.Wait()
+}
+
+func newTestBackendDialer(t *testing.T, fix mtls.TestFixture) *backendDialer {
+	t.Helper()
+	reloader, err := mtls.NewClientReloader(testLogger(), fix.ClientCert, fix.ClientKey, fix.CAFile, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return newBackendDialer(reloader)
+}
+
+func TestBackendMTLSReloaderPicksUpRotatedClientCert(t *testing.T) {
+	fix := mtls.NewTestFixture(t)
+	reloader, err := mtls.NewClientReloader(testLogger(), fix.ClientCert, fix.ClientKey, fix.CAFile, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dialer := newBackendDialer(reloader)
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(backend.Close)
+
+	sidecarLn := startTestSidecar(t, fix, backend.Listener.Addr().String())
+
+	dial := func() error {
+		conn, err := dialer.DialContext(context.Background(), "tcp", sidecarLn.Addr().String(), "backend-sidecar", true)
+		if err != nil {
+			return err
+		}
+		return conn.Close()
+	}
+	if err := dial(); err != nil {
+		t.Fatalf("initial dial: %v", err)
+	}
+
+	fix.RotateClientCert(t)
+	if err := reloader.ReloadOnce(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if err := dial(); err != nil {
+		t.Fatalf("dial after rotation: %v", err)
+	}
 }

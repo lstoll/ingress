@@ -1,20 +1,9 @@
 package main
 
 import (
-	"crypto/tls"
 	"fmt"
 	"strings"
-
-	"github.com/lstoll/ingress/internal/mtls"
 )
-
-func loadBackendMTLSClientConfig(certFile, keyFile, caFile string) (*tls.Config, error) {
-	cfg, err := mtls.ClientConfig(certFile, keyFile, caFile)
-	if err != nil {
-		return nil, err
-	}
-	return cfg, nil
-}
 
 func validateBackendMTLSFlags(clientCert, clientKey, caFile string) error {
 	set := []string{clientCert, clientKey, caFile}

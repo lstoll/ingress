@@ -24,6 +24,7 @@ func main() {
 	serverCert := fs.String("server-cert", "", "Server certificate file")
 	serverKey := fs.String("server-key", "", "Server private key file")
 	clientCA := fs.String("client-ca", "", "CA bundle for verifying client certificates")
+	certReloadInterval := fs.Duration("cert-reload-interval", mtls.DefaultReloadInterval, "How often to reload certificate files from disk")
 	logLevel := fs.String("log-level", envOrDefault("BACKEND_SIDECAR_LOG_LEVEL", "info"), "Log level: debug, info, warn, error")
 
 	if err := fs.Parse(os.Args[1:]); err != nil {
@@ -41,13 +42,20 @@ func main() {
 		os.Exit(2)
 	}
 
-	tlsCfg, err := mtls.ServerConfig(*serverCert, *serverKey, *clientCA, *expectedClientSVID)
+	reloader, err := mtls.NewServerReloader(
+		logger.With("component", "cert-reloader"),
+		*serverCert,
+		*serverKey,
+		*clientCA,
+		*expectedClientSVID,
+		*certReloadInterval,
+	)
 	if err != nil {
 		logger.Error("loading server TLS config", "error", err)
 		os.Exit(1)
 	}
 
-	ln, err := tls.Listen("tcp", *listen, tlsCfg)
+	ln, err := tls.Listen("tcp", *listen, reloader.ServerTLSConfig())
 	if err != nil {
 		logger.Error("listening", "addr", *listen, "error", err)
 		os.Exit(1)
@@ -57,10 +65,12 @@ func main() {
 		"listen", *listen,
 		"forward", *forward,
 		"expected_client_svid", *expectedClientSVID,
+		"cert_reload_interval", certReloadInterval.String(),
 	)
 
 	var g run.Group
 	ctx, cancel := context.WithCancel(context.Background())
+	reloader.Start(ctx)
 	g.Add(run.SignalHandler(ctx, os.Interrupt))
 
 	g.Add(func() error {
