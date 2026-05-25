@@ -52,6 +52,7 @@ func TestSidecarMuxHTTPProbe(t *testing.T) {
 		nil,
 		app.Listener.Addr().String(),
 		app.Listener.Addr().String(),
+		"",
 		[]string{"/healthz"},
 	)
 	if err != nil {
@@ -91,6 +92,7 @@ func TestSidecarMuxRejectsHTTPWithoutProbePrefixes(t *testing.T) {
 		nil,
 		"127.0.0.1:9",
 		"127.0.0.1:9",
+		"",
 		nil,
 	)
 	if err != nil {
@@ -109,6 +111,55 @@ func TestSidecarMuxRejectsHTTPWithoutProbePrefixes(t *testing.T) {
 	_, err = client.Get("http://" + ln.Addr().String() + "/healthz")
 	if err == nil {
 		t.Fatal("expected connection to fail when probe prefixes are not configured")
+	}
+}
+
+func TestSidecarMuxSeparateProbeListen(t *testing.T) {
+	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	t.Cleanup(app.Close)
+
+	mux, err := newSidecarMux(
+		slog.New(slog.DiscardHandler),
+		nil,
+		app.Listener.Addr().String(),
+		app.Listener.Addr().String(),
+		"127.0.0.1:0",
+		[]string{"/healthz", "/readyz"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	probeLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = probeLn.Close() })
+
+	// Simulate binding to the configured probe-listen address.
+	go acceptLoop(probeLn, func(conn net.Conn) { handleProbeConn(mux.probe, conn) })
+
+	resp, err := http.Get("http://" + probeLn.Addr().String() + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+
+	mainLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = mainLn.Close() })
+	go acceptLoop(mainLn, mux.handle)
+
+	_, err = http.Get("http://" + mainLn.Addr().String() + "/healthz")
+	if err == nil {
+		t.Fatal("expected plain HTTP on mTLS listen port to fail when --probe-listen is configured")
 	}
 }
 
@@ -135,6 +186,7 @@ func TestSidecarMuxTLS(t *testing.T) {
 		serverCfg,
 		appLn.Addr().String(),
 		appLn.Addr().String(),
+		"",
 		nil,
 	)
 	if err != nil {

@@ -59,6 +59,23 @@ func TestNormalizePathPrefixes(t *testing.T) {
 	}
 }
 
+func TestProbeHandlerDeniedBody(t *testing.T) {
+	probe, err := newProbeHandler(slog.New(slog.DiscardHandler), "127.0.0.1:8080", []string{"/healthz"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rr := httptest.NewRecorder()
+	probe.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status %d", rr.Code)
+	}
+	if body := rr.Body.String(); body != "probe path not allowed\n" {
+		t.Fatalf("body %q", body)
+	}
+}
+
 func TestNewProbeHandlerRequiresPrefixes(t *testing.T) {
 	probe, err := newProbeHandler(slog.New(slog.DiscardHandler), "127.0.0.1:8080", nil)
 	if err != nil {
@@ -69,11 +86,30 @@ func TestNewProbeHandlerRequiresPrefixes(t *testing.T) {
 	}
 }
 
-func TestValidateProbeForward(t *testing.T) {
-	if err := validateProbeForward("", nil); err != nil {
+func TestNormalizePathPrefixesCommaSeparated(t *testing.T) {
+	got := normalizePathPrefixes([]string{"/healthz,/readyz", "/livez"})
+	want := []string{"/healthz", "/readyz", "/livez"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+}
+
+func TestValidateProbeConfig(t *testing.T) {
+	if err := validateProbeConfig("", "", nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateProbeForward("127.0.0.1:8080", []string{"/healthz"}); err != nil {
+	if err := validateProbeConfig("", "127.0.0.1:8080", []string{"/healthz"}); err != nil {
 		t.Fatal(err)
+	}
+	if err := validateProbeConfig("127.0.0.1:8080", "127.0.0.1:8080", []string{"/healthz"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateProbeConfig("127.0.0.1:8080", "", nil); err == nil {
+		t.Fatal("expected error when probe-listen is set without prefixes")
 	}
 }

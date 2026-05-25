@@ -9,6 +9,12 @@ func (s *stringSlice) String() string {
 }
 
 func (s *stringSlice) Set(value string) error {
-	*s = append(*s, value)
+	for _, part := range strings.Split(value, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		*s = append(*s, part)
+	}
 	return nil
 }

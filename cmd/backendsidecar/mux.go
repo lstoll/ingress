@@ -57,10 +57,16 @@ func newProbeHandler(logger *slog.Logger, forwardAddr string, pathPrefixes []str
 
 func (p *probeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !p.pathAllowed(r.URL.Path) {
-		p.logger.Debug("probe path denied", "path", r.URL.Path, "remote", r.RemoteAddr)
-		http.NotFound(w, r)
+		p.logger.Warn("probe path denied",
+			"path", r.URL.Path,
+			"remote", r.RemoteAddr,
+			"allowed_prefixes", p.prefixes,
+		)
+		metricProbeRequestsTotal.WithLabelValues("denied").Inc()
+		http.Error(w, "probe path not allowed", http.StatusNotFound)
 		return
 	}
+	metricProbeRequestsTotal.WithLabelValues("allowed").Inc()
 	p.proxy.ServeHTTP(w, r)
 }
 
@@ -90,18 +96,29 @@ func normalizeProbePath(path string) string {
 func normalizePathPrefixes(prefixes []string) []string {
 	var out []string
 	for _, p := range prefixes {
-		p = strings.TrimSpace(p)
-		if p == "" {
-			continue
+		for _, part := range strings.Split(p, ",") {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			out = append(out, normalizeProbePath(part))
 		}
-		out = append(out, normalizeProbePath(p))
 	}
 	return out
 }
 
-func validateProbeForward(probeForward string, pathPrefixes []string) error {
-	if len(pathPrefixes) > 0 && len(normalizePathPrefixes(pathPrefixes)) == 0 {
+func validateProbeConfig(probeListen, probeForward string, pathPrefixes []string) error {
+	prefixes := normalizePathPrefixes(pathPrefixes)
+	if len(pathPrefixes) > 0 && len(prefixes) == 0 {
 		return fmt.Errorf("--probe-path-prefix must not be empty when set")
+	}
+	if probeListen != "" {
+		if len(prefixes) == 0 {
+			return fmt.Errorf("--probe-listen requires at least one --probe-path-prefix")
+		}
+		if _, _, err := net.SplitHostPort(probeListen); err != nil {
+			return fmt.Errorf("invalid --probe-listen %q: %w", probeListen, err)
+		}
 	}
 	if probeForward == "" {
 		return nil
@@ -112,23 +129,33 @@ func validateProbeForward(probeForward string, pathPrefixes []string) error {
 	return nil
 }
 
-type sidecarMux struct {
-	logger    *slog.Logger
-	tlsConfig *tls.Config
-	forward   string
-	probe     *probeHandler
+func handleProbeConn(probe *probeHandler, conn net.Conn) {
+	defer func() { _ = conn.Close() }()
+	if probe == nil {
+		return
+	}
+	serveProbeHTTP(probe, conn, bufio.NewReader(conn))
 }
 
-func newSidecarMux(logger *slog.Logger, tlsConfig *tls.Config, forward, probeForward string, pathPrefixes []string) (*sidecarMux, error) {
+type sidecarMux struct {
+	logger            *slog.Logger
+	tlsConfig         *tls.Config
+	forward           string
+	probe             *probeHandler
+	allowHTTPOnListen bool
+}
+
+func newSidecarMux(logger *slog.Logger, tlsConfig *tls.Config, forward, probeForward, probeListen string, pathPrefixes []string) (*sidecarMux, error) {
 	probe, err := newProbeHandler(logger.With("component", "probe"), probeForward, pathPrefixes)
 	if err != nil {
 		return nil, err
 	}
 	return &sidecarMux{
-		logger:    logger,
-		tlsConfig: tlsConfig,
-		forward:   forward,
-		probe:     probe,
+		logger:            logger,
+		tlsConfig:         tlsConfig,
+		forward:           forward,
+		probe:             probe,
+		allowHTTPOnListen: probeListen == "",
 	}, nil
 }
 
@@ -152,19 +179,28 @@ func (m *sidecarMux) handle(conn net.Conn) {
 	case connKindTLS:
 		tlsConn := tls.Server(wrapped, m.tlsConfig)
 		if err := tlsConn.Handshake(); err != nil {
+			metricMTLSHandshakeErrorsTotal.Inc()
 			m.logger.Debug("tls handshake failed", "remote", conn.RemoteAddr(), "error", err)
 			return
 		}
+		metricMTLSConnectionsTotal.Inc()
 		m.logger.Debug("proxying mTLS connection", "remote", conn.RemoteAddr(), "forward", m.forward)
 		proxyConn(m.logger, tlsConn, m.forward)
 	case connKindHTTP:
 		if m.probe == nil {
+			metricUnsupportedConnectionsTotal.Inc()
 			m.logger.Debug("rejecting plain HTTP connection; no probe path prefixes configured", "remote", conn.RemoteAddr())
+			return
+		}
+		if !m.allowHTTPOnListen {
+			metricUnsupportedConnectionsTotal.Inc()
+			m.logger.Debug("rejecting plain HTTP on mTLS listen port; configure --probe-listen for kubelet probes", "remote", conn.RemoteAddr())
 			return
 		}
 		m.logger.Debug("serving probe HTTP", "remote", conn.RemoteAddr())
 		serveProbeHTTP(m.probe, wrapped, br)
 	default:
+		metricUnsupportedConnectionsTotal.Inc()
 		m.logger.Debug("unsupported connection kind", "remote", conn.RemoteAddr(), "kind", kind)
 	}
 }

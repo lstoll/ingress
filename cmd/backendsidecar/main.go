@@ -15,7 +15,7 @@ import (
 
 func main() {
 	fs := flag.NewFlagSet("backendsidecar", flag.ExitOnError)
-	listen, forward, expectedClientSVID, serverCert, serverKey, serverBundle, clientCA, probeForward, probePathPrefixes, certReloadInterval, logLevel, err := parseSidecarFlags(fs)
+	listen, forward, expectedClientSVID, serverCert, serverKey, serverBundle, clientCA, probeListen, probeForward, metricsListen, probePathPrefixes, certReloadInterval, logLevel, err := parseSidecarFlags(fs)
 	if err != nil {
 		os.Exit(2)
 	}
@@ -36,8 +36,12 @@ func main() {
 	if probeForwardAddr == "" {
 		probeForwardAddr = *forward
 	}
-	if err := validateProbeForward(probeForwardAddr, *probePathPrefixes); err != nil {
+	if err := validateProbeConfig(*probeListen, probeForwardAddr, *probePathPrefixes); err != nil {
 		logger.Error("invalid probe configuration", "error", err)
+		os.Exit(2)
+	}
+	if err := validateMetricsListen(*metricsListen); err != nil {
+		logger.Error("invalid metrics configuration", "error", err)
 		os.Exit(2)
 	}
 
@@ -58,6 +62,7 @@ func main() {
 		reloader.ServerTLSConfig(),
 		*forward,
 		probeForwardAddr,
+		*probeListen,
 		*probePathPrefixes,
 	)
 	if err != nil {
@@ -74,8 +79,10 @@ func main() {
 	logger.Info("backendsidecar listening",
 		"listen", *listen,
 		"forward", *forward,
+		"probe_listen", *probeListen,
 		"probe_forward", probeForwardAddr,
 		"probe_path_prefixes", normalizePathPrefixes(*probePathPrefixes),
+		"metrics_listen", *metricsListen,
 		"expected_client_svid", *expectedClientSVID,
 		"cert_reload_interval", certReloadInterval.String(),
 	)
@@ -102,6 +109,40 @@ func main() {
 		cancel()
 		_ = ln.Close()
 	})
+
+	if *probeListen != "" && mux.probe != nil {
+		probeLn, err := net.Listen("tcp", *probeListen)
+		if err != nil {
+			logger.Error("listening for probes", "addr", *probeListen, "error", err)
+			os.Exit(1)
+		}
+		g.Add(func() error {
+			for {
+				conn, err := probeLn.Accept()
+				if err != nil {
+					select {
+					case <-ctx.Done():
+						return nil
+					default:
+					}
+					return fmt.Errorf("probe accept: %w", err)
+				}
+				go handleProbeConn(mux.probe, conn)
+			}
+		}, func(error) {
+			cancel()
+			_ = probeLn.Close()
+		})
+	}
+
+	if *metricsListen != "" {
+		metricsSrv := newMetricsServer(logger.With("component", "metrics"), reloader.ServerTLSConfig())
+		g.Add(func() error {
+			return startMetricsServer(ctx, logger.With("component", "metrics"), *metricsListen, metricsSrv)
+		}, func(error) {
+			cancel()
+		})
+	}
 
 	if err := g.Run(); err != nil {
 		logger.Error("running", "error", err)
