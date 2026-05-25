@@ -2,15 +2,12 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"os"
-	"sync"
-	"time"
 
 	"github.com/lstoll/ingress/internal/mtls"
 	"github.com/oklog/run"
@@ -18,7 +15,7 @@ import (
 
 func main() {
 	fs := flag.NewFlagSet("backendsidecar", flag.ExitOnError)
-	listen, forward, expectedClientSVID, serverCert, serverKey, serverBundle, clientCA, certReloadInterval, logLevel, err := parseSidecarFlags(fs)
+	listen, forward, expectedClientSVID, serverCert, serverKey, serverBundle, clientCA, probeForward, probePathPrefixes, certReloadInterval, logLevel, err := parseSidecarFlags(fs)
 	if err != nil {
 		os.Exit(2)
 	}
@@ -35,6 +32,15 @@ func main() {
 		os.Exit(2)
 	}
 
+	probeForwardAddr := *probeForward
+	if probeForwardAddr == "" {
+		probeForwardAddr = *forward
+	}
+	if err := validateProbeForward(probeForwardAddr, *probePathPrefixes); err != nil {
+		logger.Error("invalid probe configuration", "error", err)
+		os.Exit(2)
+	}
+
 	reloader, err := mtls.NewServerReloader(
 		logger.With("component", "cert-reloader"),
 		identity,
@@ -47,7 +53,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	ln, err := tls.Listen("tcp", *listen, reloader.ServerTLSConfig())
+	mux, err := newSidecarMux(
+		logger,
+		reloader.ServerTLSConfig(),
+		*forward,
+		probeForwardAddr,
+		*probePathPrefixes,
+	)
+	if err != nil {
+		logger.Error("creating connection mux", "error", err)
+		os.Exit(1)
+	}
+
+	ln, err := net.Listen("tcp", *listen)
 	if err != nil {
 		logger.Error("listening", "addr", *listen, "error", err)
 		os.Exit(1)
@@ -56,6 +74,8 @@ func main() {
 	logger.Info("backendsidecar listening",
 		"listen", *listen,
 		"forward", *forward,
+		"probe_forward", probeForwardAddr,
+		"probe_path_prefixes", normalizePathPrefixes(*probePathPrefixes),
 		"expected_client_svid", *expectedClientSVID,
 		"cert_reload_interval", certReloadInterval.String(),
 	)
@@ -76,7 +96,7 @@ func main() {
 				}
 				return fmt.Errorf("accept: %w", err)
 			}
-			go handleSidecarConn(logger, conn, *forward)
+			go mux.handle(conn)
 		}
 	}, func(error) {
 		cancel()
@@ -87,34 +107,6 @@ func main() {
 		logger.Error("running", "error", err)
 		os.Exit(1)
 	}
-}
-
-func handleSidecarConn(logger *slog.Logger, client net.Conn, forwardAddr string) {
-	defer func() { _ = client.Close() }()
-
-	upstream, err := net.DialTimeout("tcp", forwardAddr, 10*time.Second)
-	if err != nil {
-		logger.Warn("dialing forward target", "forward", forwardAddr, "error", err)
-		return
-	}
-	defer func() { _ = upstream.Close() }()
-
-	logger.Debug("proxying connection", "forward", forwardAddr, "client", client.RemoteAddr().String())
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		_, _ = io.Copy(upstream, client)
-		if tc, ok := upstream.(*net.TCPConn); ok {
-			_ = tc.CloseWrite()
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		_, _ = io.Copy(client, upstream)
-	}()
-	wg.Wait()
 }
 
 func setupSidecarLogger(level string, out io.Writer) (*slog.Logger, error) {
