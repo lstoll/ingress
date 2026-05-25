@@ -60,6 +60,9 @@ func main() {
 		watchNamespace          = fs.String("watch-namespace", "", "Optional namespace to watch services in. Empty means all namespaces")
 		certMode                = fs.String("cert-mode", certModeSelfSigned, "Certificate mode for terminated TLS routes: self-signed or autocert")
 		autocertSecret          = fs.String("autocert-secret", "", "namespace/name secret for autocert cache (required when --cert-mode=autocert)")
+		backendMTLSClientCert   = fs.String("backend-mtls-client-cert", "", "Client certificate file for backend mTLS dialing")
+		backendMTLSClientKey    = fs.String("backend-mtls-client-key", "", "Client private key file for backend mTLS dialing")
+		backendMTLSCA           = fs.String("backend-mtls-ca", "", "CA bundle for verifying backend mTLS server certificates")
 		metricsListen           = fs.String("metrics-listen", ":9090", "Metrics server listen address (set to 0 to disable)")
 		healthListen            = fs.String("health-listen", ":8080", "Health probe listen address (set to 0 to disable)")
 		logLevel                = fs.String("log-level", envOrDefault("INGRESS_LOG_LEVEL", "info"), "Log level: debug, info, warn, error")
@@ -96,7 +99,7 @@ func main() {
 	logf.SetLogger(logr.FromSlogHandler(appLogger.With("component", "controller-runtime").Handler()))
 
 	log := appLogger.With("component", "ingress")
-	if err := validateStartupConfig(*instance, *certMode, *autocertSecret); err != nil {
+	if err := validateStartupConfig(*instance, *certMode, *autocertSecret, *backendMTLSClientCert, *backendMTLSClientKey, *backendMTLSCA); err != nil {
 		log.Error("invalid startup configuration", "error", err)
 		os.Exit(2)
 	}
@@ -136,6 +139,16 @@ func main() {
 
 	// TLS front: SNI index + per-Service bindings (see router.go model).
 	ir = newIngressRouter(log.With("component", "ingress-router"), ctx, cp)
+
+	if *backendMTLSClientCert != "" || *backendMTLSClientKey != "" || *backendMTLSCA != "" {
+		tlsCfg, err := loadBackendMTLSClientConfig(*backendMTLSClientCert, *backendMTLSClientKey, *backendMTLSCA)
+		if err != nil {
+			log.Error("loading backend mTLS client config", "error", err)
+			os.Exit(1)
+		}
+		ir.backendDialer = newBackendDialer(tlsCfg)
+		log.Info("backend mTLS client configured")
+	}
 
 	healthInternalAddr := *healthListen
 	if *listenProxyProto && *healthListen != "0" && *healthListen != "" {
@@ -332,7 +345,7 @@ func readVersion() string {
 	return strings.Join(parts, " ")
 }
 
-func validateStartupConfig(instance, certMode, autocertSecret string) error {
+func validateStartupConfig(instance, certMode, autocertSecret, backendMTLSClientCert, backendMTLSClientKey, backendMTLSCA string) error {
 	if instance == "" {
 		return fmt.Errorf("--instance must be set")
 	}
@@ -343,6 +356,9 @@ func validateStartupConfig(instance, certMode, autocertSecret string) error {
 		if _, _, err := splitNamespacedName(autocertSecret); err != nil {
 			return fmt.Errorf("invalid --autocert-secret, expected namespace/name: %w", err)
 		}
+	}
+	if err := validateBackendMTLSFlags(backendMTLSClientCert, backendMTLSClientKey, backendMTLSCA); err != nil {
+		return err
 	}
 	return nil
 }

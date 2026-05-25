@@ -4,27 +4,30 @@ import "testing"
 
 func TestValidateStartupConfig(t *testing.T) {
 	tests := []struct {
-		name           string
-		instance       string
-		certMode       string
-		autocertSecret string
-		wantErr        bool
+		name            string
+		instance        string
+		certMode        string
+		autocertSecret  string
+		backendMTLSCert string
+		backendMTLSKey  string
+		backendMTLSCA   string
+		wantErr         bool
 	}{
 		{
-			name:        "valid self-signed mode",
-			instance:    "ingress1",
-			certMode:    certModeSelfSigned,
+			name:     "valid self-signed mode",
+			instance: "ingress1",
+			certMode: certModeSelfSigned,
 		},
 		{
-			name:        "missing instance",
-			certMode:    certModeSelfSigned,
-			wantErr:     true,
+			name:     "missing instance",
+			certMode: certModeSelfSigned,
+			wantErr:  true,
 		},
 		{
-			name:        "autocert missing secret",
-			instance:    "ingress1",
-			certMode:    certModeAutocert,
-			wantErr:     true,
+			name:       "autocert missing secret",
+			instance:   "ingress1",
+			certMode:   certModeAutocert,
+			wantErr:    true,
 		},
 		{
 			name:           "autocert invalid secret format",
@@ -39,11 +42,26 @@ func TestValidateStartupConfig(t *testing.T) {
 			certMode:       certModeAutocert,
 			autocertSecret: "ingress-dev/autocert-cache",
 		},
+		{
+			name:            "backend mtls partial flags",
+			instance:        "ingress1",
+			certMode:        certModeSelfSigned,
+			backendMTLSCert: "cert.pem",
+			wantErr:         true,
+		},
+		{
+			name:            "backend mtls all flags",
+			instance:        "ingress1",
+			certMode:        certModeSelfSigned,
+			backendMTLSCert: "cert.pem",
+			backendMTLSKey:  "key.pem",
+			backendMTLSCA:   "ca.pem",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateStartupConfig(tt.instance, tt.certMode, tt.autocertSecret)
+			err := validateStartupConfig(tt.instance, tt.certMode, tt.autocertSecret, tt.backendMTLSCert, tt.backendMTLSKey, tt.backendMTLSCA)
 			if tt.wantErr && err == nil {
 				t.Fatalf("expected error but got nil")
 			}

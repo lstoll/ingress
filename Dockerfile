@@ -15,5 +15,5 @@ RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=0 go install ./.
 
 FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
-# COPY --from=build-env /go/bin/http-sidecar /
 COPY --from=build-env /go/bin/ingress /
+COPY --from=build-env /go/bin/backendsidecar /

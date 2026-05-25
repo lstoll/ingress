@@ -53,6 +53,8 @@ const (
 	annRequireGroup = "ingress.lds.li/require-group"
 	// annTCPListener is the name of a raw TCP listener this service should claim.
 	annTCPListener = "ingress.lds.li/tcp-listener"
+	// annBackendMTLS enables mTLS when dialing this service's backend.
+	annBackendMTLS = "ingress.lds.li/backend-mtls"
 
 	// modeTLSPassthrough is the mode for transparently passing through TLS connections to the backend.
 	modeTLSPassthrough = "tls-passthrough"
@@ -122,6 +124,7 @@ func (s *ServiceReconciler) Reconcile(ctx context.Context, req reconcile.Request
 	}
 
 	targetAddr := net.JoinHostPort(svc.Spec.ClusterIP, strconv.Itoa(int(svc.Spec.Ports[0].Port)))
+	backendServerName := kubernetesServiceDNS(svc.Name, svc.Namespace)
 	proxyProto := svc.Annotations[annProxyProtocol] == proxyProtocolVersion1Value
 
 	var tcpListener string
@@ -170,7 +173,15 @@ func (s *ServiceReconciler) Reconcile(ctx context.Context, req reconcile.Request
 		}
 	}
 
-	if err := s.router.SetRoute(req.NamespacedName, hostnames, targetAddr, mode, proxyProto, oidcCfg, tcpListener); err != nil {
+	backendMTLS := strings.EqualFold(svc.Annotations[annBackendMTLS], "true")
+	if backendMTLS && !s.router.backendMTLSEnabled() {
+		s.logger.Info("ignoring service: backend-mtls annotation set but ingress has no backend mTLS client cert configured",
+			"name", req.Name, "namespace", req.Namespace)
+		s.router.RemoveRoute(req.NamespacedName)
+		return reconcile.Result{}, nil
+	}
+
+	if err := s.router.SetRoute(req.NamespacedName, hostnames, targetAddr, backendServerName, mode, proxyProto, oidcCfg, tcpListener, backendMTLS); err != nil {
 		reconcileTotal.WithLabelValues("error").Inc()
 		return reconcile.Result{}, err
 	}
@@ -183,6 +194,7 @@ func (s *ServiceReconciler) Reconcile(ctx context.Context, req reconcile.Request
 		"target", targetAddr,
 		"oidc", oidcCfg != nil,
 		"tcp_listener", tcpListener,
+		"backend_mtls", backendMTLS,
 	)
 	return reconcile.Result{}, nil
 }

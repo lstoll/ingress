@@ -45,6 +45,8 @@ type serviceBinding struct {
 	serviceRef types.NamespacedName // which Service this binding belongs to
 	mode       string
 	targetAddr string
+	backendMTLS bool
+	backendServerName string
 
 	passthrough *tcpproxy.DialProxy
 	tcpListener string
@@ -66,6 +68,7 @@ type route struct {
 	Owner       types.NamespacedName
 	TargetAddr  string
 	Mode        string
+	BackendMTLS bool
 	Proxy       *tcpproxy.DialProxy
 	HTTPProxy   *httputil.ReverseProxy
 	HTTPHandler http.Handler
@@ -88,6 +91,7 @@ type ingressRouter struct {
 	serviceBindings map[types.NamespacedName]*serviceBinding
 
 	cp CertProvider
+	backendDialer *backendDialer
 
 	ownerMu     sync.Mutex // see mutex ordering comment at top of file
 	ownerCancel map[types.NamespacedName]context.CancelFunc
@@ -181,7 +185,26 @@ func (r *ingressRouter) registerOwnerCancel(owner types.NamespacedName, cancel c
 	r.ownerCancel[owner] = cancel
 }
 
-func (r *ingressRouter) SetRoute(owner types.NamespacedName, hostnames []string, targetAddr, mode string, proxyProto bool, oidcCfg *oidcConfig, tcpListener string) error {
+func (r *ingressRouter) backendMTLSEnabled() bool {
+	return r.backendDialer != nil && r.backendDialer.enabled()
+}
+
+func (r *ingressRouter) newDialProxy(targetAddr string, ppVersion int, backendMTLS bool, backendServerName string) *tcpproxy.DialProxy {
+	dp := &tcpproxy.DialProxy{
+		Addr:                 targetAddr,
+		ProxyProtocolVersion: ppVersion,
+	}
+	if backendMTLS {
+		d := r.backendDialer
+		serverName := backendServerName
+		dp.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			return d.DialContext(ctx, network, address, serverName, true)
+		}
+	}
+	return dp
+}
+
+func (r *ingressRouter) SetRoute(owner types.NamespacedName, hostnames []string, targetAddr, backendServerName, mode string, proxyProto bool, oidcCfg *oidcConfig, tcpListener string, backendMTLS bool) error {
 	r.cancelOwner(owner)
 
 	// --- Phase 1: build everything outside the route mutex ---
@@ -213,24 +236,20 @@ func (r *ingressRouter) SetRoute(owner types.NamespacedName, hostnames []string,
 	}()
 
 	binding := &serviceBinding{
-		serviceRef:  owner,
-		mode:        mode,
-		targetAddr:  targetAddr,
-		hostnames:   append([]string(nil), claimed...),
-		tcpListener: tcpListener,
+		serviceRef:        owner,
+		mode:              mode,
+		targetAddr:        targetAddr,
+		backendMTLS:       backendMTLS,
+		backendServerName: backendServerName,
+		hostnames:         append([]string(nil), claimed...),
+		tcpListener:       tcpListener,
 	}
 
 	switch mode {
 	case modeTCP:
-		binding.passthrough = &tcpproxy.DialProxy{
-			Addr:                 targetAddr,
-			ProxyProtocolVersion: ppVersion,
-		}
+		binding.passthrough = r.newDialProxy(targetAddr, ppVersion, backendMTLS, backendServerName)
 	case modeTLSPassthrough:
-		binding.passthrough = &tcpproxy.DialProxy{
-			Addr:                 targetAddr,
-			ProxyProtocolVersion: ppVersion,
-		}
+		binding.passthrough = r.newDialProxy(targetAddr, ppVersion, backendMTLS, backendServerName)
 	case modeHTTPS:
 		binding.httpsHosts = make(map[string]httpsHostBinding)
 		for _, canon := range claimed {
@@ -238,7 +257,18 @@ func (r *ingressRouter) SetRoute(owner types.NamespacedName, hostnames []string,
 			if err != nil {
 				return fmt.Errorf("parsing upstream url for host %s: %w", canon, err)
 			}
+			serverName := backendServerName
+			transport := &http.Transport{
+				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+					d := r.backendDialer
+					if d == nil {
+						d = newBackendDialer(nil)
+					}
+					return d.DialContext(ctx, network, addr, serverName, backendMTLS)
+				},
+			}
 			rev := &httputil.ReverseProxy{
+				Transport: transport,
 				Rewrite: func(req *httputil.ProxyRequest) {
 					req.SetURL(upstreamURL)
 					req.Out.Host = req.In.Host
@@ -412,10 +442,11 @@ func (r *ingressRouter) RouteFor(hostName string) (route, bool) {
 		return route{}, false
 	}
 	rt := route{
-		Owner:      b.serviceRef,
-		TargetAddr: b.targetAddr,
-		Mode:       b.mode,
-		Proxy:      b.passthrough,
+		Owner:       b.serviceRef,
+		TargetAddr:  b.targetAddr,
+		Mode:        b.mode,
+		BackendMTLS: b.backendMTLS,
+		Proxy:       b.passthrough,
 	}
 	if b.mode == modeHTTPS {
 		if hh, ok := b.httpsHosts[key]; ok {
@@ -708,7 +739,11 @@ func (r *ingressRouter) handleTerminateRoute(c *tcpproxy.Conn, b *serviceBinding
 	defer r.drainWg.Done()
 	defer func() { _ = tlsConn.Close() }()
 
-	upstreamConn, err := net.Dial("tcp", b.targetAddr)
+	d := r.backendDialer
+	if d == nil {
+		d = newBackendDialer(nil)
+	}
+	upstreamConn, err := d.DialContext(context.Background(), "tcp", b.targetAddr, b.backendServerName, b.backendMTLS)
 	if err != nil {
 		return err
 	}
