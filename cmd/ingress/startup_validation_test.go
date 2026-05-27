@@ -12,6 +12,7 @@ func TestValidateStartupConfig(t *testing.T) {
 		backendMTLSKey          string
 		backendMTLSBundle       string
 		backendMTLSCA           string
+		oidcSessionKeysetSecret string
 		wantErr                 bool
 	}{
 		{
@@ -25,10 +26,10 @@ func TestValidateStartupConfig(t *testing.T) {
 			wantErr:  true,
 		},
 		{
-			name:       "autocert missing secret",
-			instance:   "ingress1",
-			certMode:   certModeAutocert,
-			wantErr:    true,
+			name:     "autocert missing secret",
+			instance: "ingress1",
+			certMode: certModeAutocert,
+			wantErr:  true,
 		},
 		{
 			name:           "autocert invalid secret format",
@@ -75,11 +76,24 @@ func TestValidateStartupConfig(t *testing.T) {
 			backendMTLSCA:     "ca.pem",
 			wantErr:           true,
 		},
+		{
+			name:                    "oidc keyset secret invalid format",
+			instance:                "ingress1",
+			certMode:                certModeSelfSigned,
+			oidcSessionKeysetSecret: "oidc-secret",
+			wantErr:                 true,
+		},
+		{
+			name:                    "oidc keyset secret valid format",
+			instance:                "ingress1",
+			certMode:                certModeSelfSigned,
+			oidcSessionKeysetSecret: "ingress-dev/oidc-secret",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateStartupConfig(tt.instance, tt.certMode, tt.autocertSecret, tt.backendMTLSCert, tt.backendMTLSKey, tt.backendMTLSBundle, tt.backendMTLSCA)
+			err := validateStartupConfig(tt.instance, tt.certMode, tt.autocertSecret, tt.backendMTLSCert, tt.backendMTLSKey, tt.backendMTLSBundle, tt.backendMTLSCA, tt.oidcSessionKeysetSecret)
 			if tt.wantErr && err == nil {
 				t.Fatalf("expected error but got nil")
 			}

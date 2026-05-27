@@ -37,7 +37,10 @@ type oidcConfig struct {
 	AllowUnauthenticated bool
 	LoginPath            string
 	LogoutPath           string
+	RequestRefreshToken  bool
 }
+
+var globalOIDCSessionStoreBuilder oidcSessionStoreBuilder
 
 func buildMiddlewareForHost(ctx context.Context, incomingHostname string, cfg oidcConfig) (func(http.Handler) http.Handler, error) {
 	redirectURL := "https://" + incomingHostname + "/.ingress/oidc-callback"
@@ -64,11 +67,25 @@ func buildMiddlewareForHost(ctx context.Context, incomingHostname string, cfg oi
 	}
 
 	buildMw := func(clientID, clientSecret string) (func(http.Handler) http.Handler, error) {
-		omw, err := middleware.NewIDSSOHandlerFromDiscovery(ctx, nil, cfg.Issuer, clientID, clientSecret, redirectURL)
+		var sessStore middleware.SessionStore
+		if globalOIDCSessionStoreBuilder != nil {
+			var err error
+			sessStore, err = globalOIDCSessionStoreBuilder(ctx, incomingHostname, cfg)
+			if err != nil {
+				return nil, fmt.Errorf("oidc: creating session store: %w", err)
+			}
+		}
+
+		omw, err := middleware.NewIDSSOHandlerFromDiscovery(ctx, sessStore, cfg.Issuer, clientID, clientSecret, redirectURL)
 		if err != nil {
 			return nil, fmt.Errorf("oidc: from discovery: %w", err)
 		}
-		omw.AllowUnauthenticated = cfg.AllowUnauthenticated
+		if cfg.RequestRefreshToken && !hasScope(omw.OAuth2Config.Scopes, "offline_access") {
+			omw.OAuth2Config.Scopes = append(omw.OAuth2Config.Scopes, "offline_access")
+		}
+		// We always allow requests through this wrapper and decide here whether
+		// to trigger interactive login or pass through.
+		omw.AllowUnauthenticated = true
 
 		return func(h http.Handler) http.Handler {
 			return omw.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

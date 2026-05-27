@@ -16,10 +16,15 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/oklog/run"
 	proxyproto "github.com/pires/go-proxyproto"
+	"github.com/tink-crypto/tink-go/v2/aead"
 	"golang.org/x/term"
+	"google.golang.org/protobuf/types/known/durationpb"
 	"inet.af/tcpproxy"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
+	"lds.li/tinkrotate"
+	tinkrotatev1 "lds.li/tinkrotate/proto/tinkrotate/v1"
 
 	"github.com/lstoll/ingress/internal/mtls"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -53,24 +58,31 @@ func main() {
 	fs := flag.NewFlagSet("ingress", flag.ExitOnError)
 
 	var (
-		tlsListen               = fs.String("tls-listen", "0.0.0.0:443", "TLS listener address")
-		listenProxyProto        = fs.Bool("listen-proxy-protocol", false, "Enable Proxy Protocol parsing on incoming frontend listeners")
-		listenProxyProtoTimeout = fs.Duration("listen-proxy-protocol-timeout", 10*time.Second, "Timeout for reading Proxy Protocol header on incoming frontend listeners")
-		httpListen              = fs.String("http-listen", "", "Optional plain HTTP listener for HTTPS redirects")
-		httpsRedirectPort       = fs.String("https-redirect-port", "", "Optional explicit HTTPS port for redirects")
-		instance                = fs.String("instance", "", "Ingress instance name to select services (ingress.lds.li/instance label)")
-		watchNamespace          = fs.String("watch-namespace", "", "Optional namespace to watch services in. Empty means all namespaces")
-		certMode                = fs.String("cert-mode", certModeSelfSigned, "Certificate mode for terminated TLS routes: self-signed or autocert")
-		autocertSecret          = fs.String("autocert-secret", "", "namespace/name secret for autocert cache (required when --cert-mode=autocert)")
-		backendMTLSClientCert    = fs.String("backend-mtls-client-cert", "", "Client certificate file for backend mTLS dialing")
-		backendMTLSClientKey     = fs.String("backend-mtls-client-key", "", "Client private key file for backend mTLS dialing")
-		backendMTLSClientBundle  = fs.String("backend-mtls-client-bundle", "", "Client credential bundle file for backend mTLS dialing (Kubernetes pod certificate format)")
-		backendMTLSCA            = fs.String("backend-mtls-ca", "", "CA bundle for verifying backend mTLS server certificates")
+		tlsListen                 = fs.String("tls-listen", "0.0.0.0:443", "TLS listener address")
+		listenProxyProto          = fs.Bool("listen-proxy-protocol", false, "Enable Proxy Protocol parsing on incoming frontend listeners")
+		listenProxyProtoTimeout   = fs.Duration("listen-proxy-protocol-timeout", 10*time.Second, "Timeout for reading Proxy Protocol header on incoming frontend listeners")
+		httpListen                = fs.String("http-listen", "", "Optional plain HTTP listener for HTTPS redirects")
+		httpsRedirectPort         = fs.String("https-redirect-port", "", "Optional explicit HTTPS port for redirects")
+		instance                  = fs.String("instance", "", "Ingress instance name to select services (ingress.lds.li/instance label)")
+		watchNamespace            = fs.String("watch-namespace", "", "Optional namespace to watch services in. Empty means all namespaces")
+		certMode                  = fs.String("cert-mode", certModeSelfSigned, "Certificate mode for terminated TLS routes: self-signed or autocert")
+		autocertSecret            = fs.String("autocert-secret", "", "namespace/name secret for autocert cache (required when --cert-mode=autocert)")
+		backendMTLSClientCert     = fs.String("backend-mtls-client-cert", "", "Client certificate file for backend mTLS dialing")
+		backendMTLSClientKey      = fs.String("backend-mtls-client-key", "", "Client private key file for backend mTLS dialing")
+		backendMTLSClientBundle   = fs.String("backend-mtls-client-bundle", "", "Client credential bundle file for backend mTLS dialing (Kubernetes pod certificate format)")
+		backendMTLSCA             = fs.String("backend-mtls-ca", "", "CA bundle for verifying backend mTLS server certificates")
 		backendMTLSReloadInterval = fs.Duration("backend-mtls-reload-interval", mtls.DefaultReloadInterval, "How often to reload backend mTLS certificate files from disk")
-		metricsListen           = fs.String("metrics-listen", ":9090", "Metrics server listen address (set to 0 to disable)")
-		healthListen            = fs.String("health-listen", ":8080", "Health probe listen address (set to 0 to disable)")
-		logLevel                = fs.String("log-level", envOrDefault("INGRESS_LOG_LEVEL", "info"), "Log level: debug, info, warn, error")
-		showVersion             = fs.Bool("version", false, "Print version and exit")
+		oidcSessionKeysetSecret   = fs.String("oidc-session-keyset-secret", "", "namespace/name secret used for OIDC encrypted cookie keyset (enables refresh-token-capable session persistence)")
+		oidcSessionKeysetName     = fs.String("oidc-session-keyset-name", "oidc-session-cookie", "Keyset name within OIDC session keyset storage")
+		oidcSessionRotateEvery    = fs.Duration("oidc-session-keyset-rotate-every", time.Hour, "How often to check/perform OIDC session keyset rotation")
+		oidcSessionPrimaryDur     = fs.Duration("oidc-session-keyset-primary-duration", 7*24*time.Hour, "How long OIDC session key remains primary")
+		oidcSessionPropDur        = fs.Duration("oidc-session-keyset-propagation-duration", time.Hour, "How long new OIDC session key propagates before promotion")
+		oidcSessionPhaseOutDur    = fs.Duration("oidc-session-keyset-phaseout-duration", 7*24*time.Hour, "How long old OIDC session key remains enabled for decryption")
+		oidcSessionDeleteGraceDur = fs.Duration("oidc-session-keyset-delete-grace-duration", 30*24*time.Hour, "How long disabled OIDC session keys are retained before deletion")
+		metricsListen             = fs.String("metrics-listen", ":9090", "Metrics server listen address (set to 0 to disable)")
+		healthListen              = fs.String("health-listen", ":8080", "Health probe listen address (set to 0 to disable)")
+		logLevel                  = fs.String("log-level", envOrDefault("INGRESS_LOG_LEVEL", "info"), "Log level: debug, info, warn, error")
+		showVersion               = fs.Bool("version", false, "Print version and exit")
 
 		tcpListeners stringSlice
 	)
@@ -103,7 +115,7 @@ func main() {
 	logf.SetLogger(logr.FromSlogHandler(appLogger.With("component", "controller-runtime").Handler()))
 
 	log := appLogger.With("component", "ingress")
-	if err := validateStartupConfig(*instance, *certMode, *autocertSecret, *backendMTLSClientCert, *backendMTLSClientKey, *backendMTLSClientBundle, *backendMTLSCA); err != nil {
+	if err := validateStartupConfig(*instance, *certMode, *autocertSecret, *backendMTLSClientCert, *backendMTLSClientKey, *backendMTLSClientBundle, *backendMTLSCA, *oidcSessionKeysetSecret); err != nil {
 		log.Error("invalid startup configuration", "error", err)
 		os.Exit(2)
 	}
@@ -191,6 +203,47 @@ func main() {
 	}
 
 	var g run.Group
+
+	if *oidcSessionKeysetSecret != "" {
+		secNS, secName, err := splitNamespacedName(*oidcSessionKeysetSecret)
+		if err != nil {
+			log.Error("invalid oidc session keyset secret", "error", err)
+			os.Exit(2)
+		}
+		ms := newK8sSecretManagedStore(mgr.GetClient(), types.NamespacedName{Namespace: secNS, Name: secName})
+		policy := &tinkrotatev1.RotationPolicy{
+			KeyTemplate:         aead.AES256GCMKeyTemplate(),
+			PrimaryDuration:     durationpb.New(*oidcSessionPrimaryDur),
+			PropagationTime:     durationpb.New(*oidcSessionPropDur),
+			PhaseOutDuration:    durationpb.New(*oidcSessionPhaseOutDur),
+			DeletionGracePeriod: durationpb.New(*oidcSessionDeleteGraceDur),
+		}
+		rotator, err := tinkrotate.NewAutoRotator(ms, *oidcSessionRotateEvery, &tinkrotate.AutoRotatorOpts{
+			Logger: appLogger.With("component", "oidc-session-key-rotation"),
+			ProvisionPolicies: map[string]*tinkrotatev1.RotationPolicy{
+				*oidcSessionKeysetName: policy,
+			},
+		})
+		if err != nil {
+			log.Error("creating oidc session key rotator", "error", err)
+			os.Exit(1)
+		}
+		source := tinkrotate.NewPrimitiveSource(ms, time.Minute)
+		globalOIDCSessionStoreBuilder = newTinkBackedOIDCSessionStoreBuilder(source, *oidcSessionKeysetName)
+		log.Info("oidc encrypted session cookie storage enabled",
+			"secret", *oidcSessionKeysetSecret,
+			"keyset", *oidcSessionKeysetName,
+			"rotation_check_interval", (*oidcSessionRotateEvery).String(),
+			"primary_duration", (*oidcSessionPrimaryDur).String(),
+		)
+		g.Add(func() error {
+			rotator.Start(ctx)
+			<-ctx.Done()
+			return nil
+		}, func(error) {
+			rotator.Stop()
+		})
+	}
 
 	g.Add(run.SignalHandler(ctx, os.Interrupt))
 
@@ -363,7 +416,7 @@ func readVersion() string {
 	return strings.Join(parts, " ")
 }
 
-func validateStartupConfig(instance, certMode, autocertSecret, backendMTLSClientCert, backendMTLSClientKey, backendMTLSClientBundle, backendMTLSCA string) error {
+func validateStartupConfig(instance, certMode, autocertSecret, backendMTLSClientCert, backendMTLSClientKey, backendMTLSClientBundle, backendMTLSCA, oidcSessionKeysetSecret string) error {
 	if instance == "" {
 		return fmt.Errorf("--instance must be set")
 	}
@@ -378,8 +431,14 @@ func validateStartupConfig(instance, certMode, autocertSecret, backendMTLSClient
 	if err := validateBackendMTLSFlags(backendMTLSClientCert, backendMTLSClientKey, backendMTLSClientBundle, backendMTLSCA); err != nil {
 		return err
 	}
+	if oidcSessionKeysetSecret != "" {
+		if _, _, err := splitNamespacedName(oidcSessionKeysetSecret); err != nil {
+			return fmt.Errorf("invalid --oidc-session-keyset-secret, expected namespace/name: %w", err)
+		}
+	}
 	return nil
 }
+
 type mgrConfig struct {
 	watchNamespace string
 	metricsListen  string

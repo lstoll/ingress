@@ -196,6 +196,7 @@ func TestServiceReconcileOIDCConfigValidation(t *testing.T) {
 	// Update svc with valid OIDC config
 	svc.Annotations[annOIDCDynamicClient] = "true"
 	svc.Annotations[annOIDCBypassPatterns] = "/pub,/api/v1/health"
+	svc.Annotations[annOIDCRequestRefreshToken] = "true"
 	r.Client = fake.NewClientBuilder().WithScheme(scheme).WithObjects(svc).Build()
 
 	if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: svc.Name}}); err != nil {
@@ -210,6 +211,9 @@ func TestServiceReconcileOIDCConfigValidation(t *testing.T) {
 	}
 	if len(route.OIDC.BypassPatterns) != 2 || route.OIDC.BypassPatterns[0] != "/pub" || route.OIDC.BypassPatterns[1] != "/api/v1/health" {
 		t.Fatalf("expected bypass patterns to be parsed, got %v", route.OIDC.BypassPatterns)
+	}
+	if !route.OIDC.RequestRefreshToken {
+		t.Fatalf("expected request refresh token to be true")
 	}
 }
 
@@ -234,11 +238,11 @@ func TestServiceReconcileOIDCExplicitConfig(t *testing.T) {
 			},
 			Annotations: map[string]string{
 				annMode:             modeHTTPS,
-				annHTTPHostnames:     "auth-explicit.example.com",
-				annAuthMode:          authModeOIDC,
-				annOIDCIssuer:        "https://issuer.example.com",
-				annOIDCClientID:      "my-client-id",
-				annOIDCClientSecret:  "my-client-secret",
+				annHTTPHostnames:    "auth-explicit.example.com",
+				annAuthMode:         authModeOIDC,
+				annOIDCIssuer:       "https://issuer.example.com",
+				annOIDCClientID:     "my-client-id",
+				annOIDCClientSecret: "my-client-secret",
 			},
 		},
 		Spec: corev1.ServiceSpec{

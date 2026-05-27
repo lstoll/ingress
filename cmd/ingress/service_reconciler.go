@@ -37,6 +37,8 @@ const (
 	annOIDCLoginPath = "ingress.lds.li/oidc-login-path"
 	// annOIDCLogoutPath is the path that triggers the OIDC logout flow.
 	annOIDCLogoutPath = "ingress.lds.li/oidc-logout-path"
+	// annOIDCRequestRefreshToken requests offline_access scope for refresh token issuance when set to "true".
+	annOIDCRequestRefreshToken = "ingress.lds.li/oidc-request-refresh-token"
 	// annOIDCClientID is an explicit OIDC client ID to use instead of dynamic registration.
 	annOIDCClientID = "ingress.lds.li/oidc-client-id"
 	// annOIDCClientSecret is an explicit OIDC client secret to use instead of dynamic registration.
@@ -170,6 +172,7 @@ func (s *ServiceReconciler) Reconcile(ctx context.Context, req reconcile.Request
 			AllowUnauthenticated: strings.EqualFold(svc.Annotations[annOIDCAllowUnauthenticated], "true"),
 			LoginPath:            strings.TrimSpace(svc.Annotations[annOIDCLoginPath]),
 			LogoutPath:           strings.TrimSpace(svc.Annotations[annOIDCLogoutPath]),
+			RequestRefreshToken:  parseBoolDefault(svc.Annotations[annOIDCRequestRefreshToken], false),
 		}
 	}
 
@@ -218,3 +221,14 @@ func splitCSV(v string) []string {
 	return out
 }
 
+func parseBoolDefault(raw string, defaultValue bool) bool {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return defaultValue
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return defaultValue
+	}
+	return b
+}

@@ -106,6 +106,10 @@ metadata:
     ingress.lds.li/oidc-preferred-username-header: "Remote-User"
     ingress.lds.li/oidc-email-header: "Remote-User-Email"
     ingress.lds.li/require-group: "admin"
+    ingress.lds.li/oidc-request-refresh-token: "true"
+    ingress.lds.li/oidc-unauth-401-paths: "^/api"
+    ingress.lds.li/oidc-unauth-401-accept: "application/json"
+    ingress.lds.li/oidc-unauth-401-xrw: "true"
 spec:
   selector:
     app.kubernetes.io/name: secure-webapp
@@ -114,6 +118,9 @@ spec:
       port: 80
       targetPort: 8080
 ```
+
+When `ingress` is started with `--oidc-session-keyset-secret=namespace/name`, OIDC sessions are
+stored as encrypted cookies backed by a weekly-rotating Tink keyset in that Secret.
 
 ### TCP
 
