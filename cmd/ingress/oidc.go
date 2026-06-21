@@ -69,6 +69,7 @@ func buildMiddlewareForHost(ctx context.Context, incomingHostname string, cfg oi
 			return nil, fmt.Errorf("oidc: from discovery: %w", err)
 		}
 		omw.AllowUnauthenticated = cfg.AllowUnauthenticated
+		omw.AJAXUnauth401 = true
 
 		return func(h http.Handler) http.Handler {
 			return omw.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
