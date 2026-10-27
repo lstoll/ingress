@@ -42,10 +42,10 @@ var _ tcpproxy.Target = (*ingressRouter)(nil)
 // serviceBinding is the full ingress spec for one Kubernetes Service (from
 // annotations). Upstreams and HTTP handlers exist only here—not in the SNI map.
 type serviceBinding struct {
-	serviceRef types.NamespacedName // which Service this binding belongs to
-	mode       string
-	targetAddr string
-	backendMTLS bool
+	serviceRef        types.NamespacedName // which Service this binding belongs to
+	mode              string
+	targetAddr        string
+	backendMTLS       bool
 	backendServerName string
 
 	passthrough *tcpproxy.DialProxy
@@ -90,7 +90,7 @@ type ingressRouter struct {
 	// Layer 2 — workload: Service → how to run traffic for that Service.
 	serviceBindings map[types.NamespacedName]*serviceBinding
 
-	cp CertProvider
+	cp            CertProvider
 	backendDialer *backendDialer
 
 	ownerMu     sync.Mutex // see mutex ordering comment at top of file
@@ -678,10 +678,10 @@ func (r *ingressRouter) buildOwnerHTTPServerLocked(owner types.NamespacedName) (
 
 	ln := newChanListener()
 	srv := &http.Server{
-		Handler:           r.serveHTTPForOwner(owner),
+		Handler:           withWriteIdleTimeout(r.serveHTTPForOwner(owner), responseWriteIdleTimeout),
 		ReadHeaderTimeout: 30 * time.Second,
 		ReadTimeout:       2 * time.Minute,
-		WriteTimeout:      2 * time.Minute,
+		WriteTimeout:      responseWriteIdleTimeout,
 	}
 	if err := http2.ConfigureServer(srv, &http2.Server{}); err != nil {
 		_ = ln.Close()
