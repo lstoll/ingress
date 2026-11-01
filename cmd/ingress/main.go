@@ -53,24 +53,25 @@ func main() {
 	fs := flag.NewFlagSet("ingress", flag.ExitOnError)
 
 	var (
-		tlsListen               = fs.String("tls-listen", "0.0.0.0:443", "TLS listener address")
-		listenProxyProto        = fs.Bool("listen-proxy-protocol", false, "Enable Proxy Protocol parsing on incoming frontend listeners")
-		listenProxyProtoTimeout = fs.Duration("listen-proxy-protocol-timeout", 10*time.Second, "Timeout for reading Proxy Protocol header on incoming frontend listeners")
-		httpListen              = fs.String("http-listen", "", "Optional plain HTTP listener for HTTPS redirects")
-		httpsRedirectPort       = fs.String("https-redirect-port", "", "Optional explicit HTTPS port for redirects")
-		instance                = fs.String("instance", "", "Ingress instance name to select services (ingress.lds.li/instance label)")
-		watchNamespace          = fs.String("watch-namespace", "", "Optional namespace to watch services in. Empty means all namespaces")
-		certMode                = fs.String("cert-mode", certModeSelfSigned, "Certificate mode for terminated TLS routes: self-signed or autocert")
-		autocertSecret          = fs.String("autocert-secret", "", "namespace/name secret for autocert cache (required when --cert-mode=autocert)")
-		backendMTLSClientCert    = fs.String("backend-mtls-client-cert", "", "Client certificate file for backend mTLS dialing")
-		backendMTLSClientKey     = fs.String("backend-mtls-client-key", "", "Client private key file for backend mTLS dialing")
-		backendMTLSClientBundle  = fs.String("backend-mtls-client-bundle", "", "Client credential bundle file for backend mTLS dialing (Kubernetes pod certificate format)")
-		backendMTLSCA            = fs.String("backend-mtls-ca", "", "CA bundle for verifying backend mTLS server certificates")
+		tlsListen                 = fs.String("tls-listen", "0.0.0.0:443", "TLS listener address")
+		listenProxyProto          = fs.Bool("listen-proxy-protocol", false, "Enable Proxy Protocol parsing on incoming frontend listeners")
+		listenProxyProtoTimeout   = fs.Duration("listen-proxy-protocol-timeout", 10*time.Second, "Timeout for reading Proxy Protocol header on incoming frontend listeners")
+		httpListen                = fs.String("http-listen", "", "Optional plain HTTP listener for HTTPS redirects")
+		httpsRedirectPort         = fs.String("https-redirect-port", "", "Optional explicit HTTPS port for redirects")
+		instance                  = fs.String("instance", "", "Ingress instance name to select services (ingress.lds.li/instance label)")
+		watchNamespace            = fs.String("watch-namespace", "", "Optional namespace to watch services in. Empty means all namespaces")
+		certMode                  = fs.String("cert-mode", certModeSelfSigned, "Certificate mode for terminated TLS routes: self-signed or autocert")
+		autocertSecret            = fs.String("autocert-secret", "", "namespace/name secret for autocert cache (required when --cert-mode=autocert)")
+		backendMTLSClientCert     = fs.String("backend-mtls-client-cert", "", "Client certificate file for backend mTLS dialing")
+		backendMTLSClientKey      = fs.String("backend-mtls-client-key", "", "Client private key file for backend mTLS dialing")
+		backendMTLSClientBundle   = fs.String("backend-mtls-client-bundle", "", "Client credential bundle file for backend mTLS dialing (Kubernetes pod certificate format)")
+		backendMTLSCA             = fs.String("backend-mtls-ca", "", "CA bundle for verifying backend mTLS server certificates")
 		backendMTLSReloadInterval = fs.Duration("backend-mtls-reload-interval", mtls.DefaultReloadInterval, "How often to reload backend mTLS certificate files from disk")
-		metricsListen           = fs.String("metrics-listen", ":9090", "Metrics server listen address (set to 0 to disable)")
-		healthListen            = fs.String("health-listen", ":8080", "Health probe listen address (set to 0 to disable)")
-		logLevel                = fs.String("log-level", envOrDefault("INGRESS_LOG_LEVEL", "info"), "Log level: debug, info, warn, error")
-		showVersion             = fs.Bool("version", false, "Print version and exit")
+		oidcClientKeysetSecret    = fs.String("oidc-client-keyset-secret", "", "namespace/name secret holding the rotating keyset used for OIDC private_key_jwt client auth. Unset disables private_key_jwt")
+		metricsListen             = fs.String("metrics-listen", ":9090", "Metrics server listen address (set to 0 to disable)")
+		healthListen              = fs.String("health-listen", ":8080", "Health probe listen address (set to 0 to disable)")
+		logLevel                  = fs.String("log-level", envOrDefault("INGRESS_LOG_LEVEL", "info"), "Log level: debug, info, warn, error")
+		showVersion               = fs.Bool("version", false, "Print version and exit")
 
 		tcpListeners stringSlice
 	)
@@ -165,6 +166,16 @@ func main() {
 		log.Info("backend mTLS client configured", "reload_interval", (*backendMTLSReloadInterval).String())
 	}
 
+	var oidcKeys *oidcClientKeys
+	if *oidcClientKeysetSecret != "" {
+		oidcKeys, err = newOIDCClientKeysFromSecret(ctx, log.With("component", "oidc-client-keys"), cfg, *oidcClientKeysetSecret)
+		if err != nil {
+			log.Error("starting oidc client keyset", "error", err)
+			os.Exit(1)
+		}
+		log.Info("oidc client keyset configured", "secret", *oidcClientKeysetSecret)
+	}
+
 	healthInternalAddr := *healthListen
 	if *listenProxyProto && *healthListen != "0" && *healthListen != "" {
 		l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -181,9 +192,10 @@ func main() {
 		metricsListen:  *metricsListen,
 		healthListen:   healthInternalAddr,
 	}, &ServiceReconciler{
-		logger:   log.With("component", "service-reconciler"),
-		router:   ir,
-		instance: *instance,
+		logger:         log.With("component", "service-reconciler"),
+		router:         ir,
+		instance:       *instance,
+		oidcClientKeys: oidcKeys,
 	})
 	if err != nil {
 		log.Error("creating manager", "error", err)
@@ -380,6 +392,7 @@ func validateStartupConfig(instance, certMode, autocertSecret, backendMTLSClient
 	}
 	return nil
 }
+
 type mgrConfig struct {
 	watchNamespace string
 	metricsListen  string

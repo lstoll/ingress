@@ -12,8 +12,12 @@ import (
 	"time"
 	"unicode"
 
+	"golang.org/x/oauth2"
 	"lds.li/oauth2ext/claims"
+	"lds.li/oauth2ext/clientjwt"
+	"lds.li/oauth2ext/jwt"
 	"lds.li/oauth2ext/middleware"
+	"lds.li/oauth2ext/oauth2client"
 	"lds.li/oauth2ext/oidcclientreg"
 	"lds.li/oauth2ext/provider"
 )
@@ -33,6 +37,10 @@ type oidcConfig struct {
 
 	ClientID     string
 	ClientSecret string
+	// ClientKeys, if set, authenticates to the token endpoint with
+	// private_key_jwt instead of ClientSecret, and serves the public keys at
+	// oidcJWKSPath. Requires an explicit ClientID.
+	ClientKeys *oidcClientKeys
 
 	AllowUnauthenticated bool
 	LoginPath            string
@@ -67,6 +75,18 @@ func buildMiddlewareForHost(ctx context.Context, incomingHostname string, cfg oi
 		omw, err := middleware.NewIDSSOHandlerFromDiscovery(ctx, nil, cfg.Issuer, clientID, clientSecret, redirectURL)
 		if err != nil {
 			return nil, fmt.Errorf("oidc: from discovery: %w", err)
+		}
+		if cfg.ClientKeys != nil {
+			base, ok := omw.OAuth2Client.(*oauth2.Config)
+			if !ok {
+				return nil, fmt.Errorf("oidc: unexpected oauth2 client type %T", omw.OAuth2Client)
+			}
+			omw.OAuth2Client = &clientjwt.Config{
+				Config:           *base,
+				Signer:           cfg.ClientKeys.Signer,
+				SigningAlgorithm: jwt.ES256,
+			}
+			omw.ClientType = oauth2client.ConfidentialClient
 		}
 		omw.AllowUnauthenticated = cfg.AllowUnauthenticated
 		omw.AJAXUnauth401 = true
@@ -137,7 +157,7 @@ func buildMiddlewareForHost(ctx context.Context, incomingHostname string, cfg oi
 			err          error
 		)
 
-		if clientID == "" || clientSecret == "" {
+		if clientID == "" || (clientSecret == "" && cfg.ClientKeys == nil) {
 			// Always re-register: middleware construction doesn't validate
 			// credentials (they're only used at token exchange time), so we
 			// can't detect stale creds by retrying the build.
@@ -178,6 +198,10 @@ func buildMiddlewareForHost(ctx context.Context, incomingHostname string, cfg oi
 
 	return func(h http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if cfg.ClientKeys != nil && r.URL.Path == oidcJWKSPath {
+				cfg.ClientKeys.ServeHTTP(w, r)
+				return
+			}
 			for _, p := range cfg.BypassPatterns {
 				if strings.HasPrefix(r.URL.Path, p) {
 					withInboundHeaderStrip(h).ServeHTTP(w, r)
@@ -232,9 +256,9 @@ func registerOIDCClient(ctx context.Context, clientName string, prov *provider.P
 		GrantTypes:      []string{"authorization_code"},
 	}
 
-	oidcMetadata, ok := prov.Metadata.(*provider.OIDCProviderMetadata)
-	if !ok {
-		return nil, fmt.Errorf("provider metadata is not an OIDC provider metadata")
+	oidcMetadata := prov.MetadataSnapshot()
+	if oidcMetadata == nil {
+		return nil, fmt.Errorf("provider has no OIDC metadata")
 	}
 
 	if slices.Contains(oidcMetadata.IDTokenSigningAlgValuesSupported, "ES256") {
@@ -250,7 +274,7 @@ func registerOIDCClient(ctx context.Context, clientName string, prov *provider.P
 }
 
 func claimsHasGroup(cl *claims.VerifiedID, required string) bool {
-	groups, err := cl.ArrayClaim("groups")
+	groups, err := cl.Array("groups")
 	if err != nil || groups == nil {
 		return false
 	}

@@ -115,6 +115,35 @@ spec:
       targetPort: 8080
 ```
 
+### HTTPS, OIDC auth with private_key_jwt
+
+Instead of a static client secret, ingress can authenticate to the IdP's token
+endpoint with signed client assertions (RFC 7523 `private_key_jwt`). Start
+ingress with `--oidc-client-keyset-secret=<namespace>/<name>`. Ingress keeps one
+ES256 keyset in that Secret, shared by every host, and rotates it daily. A new
+key is published 6h before it starts signing, and old keys stay published for
+6h after.
+
+Each host using this mode serves the public keys at
+`https://<host>/.ingress/oidc-jwks`. Ingress answers this path itself, ahead of
+auth and bypass patterns. Register the client at the IdP with that URL as its
+JWKS URL (passidp: `jwksURL`) and no secret.
+
+```
+    ingress.lds.li/auth-mode: "OIDC"
+    ingress.lds.li/oidc-issuer: "https://id.lds.li"
+    ingress.lds.li/oidc-client-id: "authed-app"
+    ingress.lds.li/oidc-client-auth: "private_key_jwt"
+```
+
+`private_key_jwt` requires an explicit client id, and cannot be combined with a
+client secret or dynamic registration. Services that ask for it are ignored if
+ingress was started without a keyset.
+
+The Secret is stored in cleartext. Pre-create it empty and grant ingress
+`get`/`update` on that name only (see `deploy/dev/ingress-rbac.yaml`); otherwise
+ingress needs `create` on secrets in that namespace.
+
 ### TCP
 
 ```

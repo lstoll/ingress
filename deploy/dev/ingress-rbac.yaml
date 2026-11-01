@@ -24,3 +24,34 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: ingress
+---
+# Holds the rotating OIDC private_key_jwt signing keyset. Ingress fills it at
+# runtime; never give it data here or a re-apply could wipe the keys.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ingress-oidc-client-keyset
+type: Opaque
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ingress-oidc-client-keyset
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["ingress-oidc-client-keyset"]
+    verbs: ["get", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ingress-oidc-client-keyset
+subjects:
+  - kind: ServiceAccount
+    name: ingress
+    namespace: ingress-dev
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ingress-oidc-client-keyset

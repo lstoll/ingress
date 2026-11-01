@@ -41,6 +41,11 @@ const (
 	annOIDCClientID = "ingress.lds.li/oidc-client-id"
 	// annOIDCClientSecret is an explicit OIDC client secret to use instead of dynamic registration.
 	annOIDCClientSecret = "ingress.lds.li/oidc-client-secret"
+	// annOIDCClientAuth selects how ingress authenticates to the OIDC token
+	// endpoint: "client_secret" (default) or "private_key_jwt". private_key_jwt
+	// signs assertions with the ingress-wide client keyset and serves its public
+	// keys at https://<host>/.ingress/oidc-jwks; it requires an explicit client id.
+	annOIDCClientAuth = "ingress.lds.li/oidc-client-auth"
 	// annOIDCUsernameHeader is the header to populate with the preferred_username claim.
 	annOIDCUsernameHeader = "ingress.lds.li/oidc-preferred-username-header"
 	// annOIDCEmailHeader is the header to populate with the email claim.
@@ -77,6 +82,10 @@ type ServiceReconciler struct {
 	router *ingressRouter
 
 	instance string
+
+	// oidcClientKeys signs private_key_jwt client assertions. Nil when ingress
+	// was started without an OIDC client keyset.
+	oidcClientKeys *oidcClientKeys
 }
 
 func (s *ServiceReconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
@@ -151,9 +160,36 @@ func (s *ServiceReconciler) Reconcile(ctx context.Context, req reconcile.Request
 		clientSecret := strings.TrimSpace(svc.Annotations[annOIDCClientSecret])
 		dynamic := strings.EqualFold(svc.Annotations[annOIDCDynamicClient], "true")
 
-		if !dynamic && (clientID == "" || clientSecret == "") {
-			s.logger.Info("ignoring service: oidc auth requires dynamic client registration or explicit client id/secret",
-				"name", req.Name, "namespace", req.Namespace)
+		var clientKeys *oidcClientKeys
+		switch clientAuth := strings.TrimSpace(svc.Annotations[annOIDCClientAuth]); clientAuth {
+		case "", clientAuthSecret:
+			if !dynamic && (clientID == "" || clientSecret == "") {
+				s.logger.Info("ignoring service: oidc auth requires dynamic client registration or explicit client id/secret",
+					"name", req.Name, "namespace", req.Namespace)
+				s.router.RemoveRoute(req.NamespacedName)
+				return reconcile.Result{}, nil
+			}
+		case clientAuthPrivateKeyJWT:
+			var reason string
+			switch {
+			case s.oidcClientKeys == nil:
+				reason = "private_key_jwt client auth set but ingress has no oidc client keyset configured"
+			case clientID == "":
+				reason = "private_key_jwt client auth requires an explicit client id"
+			case clientSecret != "":
+				reason = "private_key_jwt client auth cannot be combined with a client secret"
+			case dynamic:
+				reason = "private_key_jwt client auth does not support dynamic client registration"
+			}
+			if reason != "" {
+				s.logger.Info("ignoring service: "+reason, "name", req.Name, "namespace", req.Namespace)
+				s.router.RemoveRoute(req.NamespacedName)
+				return reconcile.Result{}, nil
+			}
+			clientKeys = s.oidcClientKeys
+		default:
+			s.logger.Info("ignoring service: unknown oidc client auth method",
+				"name", req.Name, "namespace", req.Namespace, "client_auth", clientAuth)
 			s.router.RemoveRoute(req.NamespacedName)
 			return reconcile.Result{}, nil
 		}
@@ -162,6 +198,7 @@ func (s *ServiceReconciler) Reconcile(ctx context.Context, req reconcile.Request
 			Issuer:               issuer,
 			ClientID:             clientID,
 			ClientSecret:         clientSecret,
+			ClientKeys:           clientKeys,
 			UsernameHeader:       strings.TrimSpace(svc.Annotations[annOIDCUsernameHeader]),
 			EmailHeader:          strings.TrimSpace(svc.Annotations[annOIDCEmailHeader]),
 			NameHeader:           strings.TrimSpace(svc.Annotations[annOIDCNameHeader]),
@@ -217,4 +254,3 @@ func splitCSV(v string) []string {
 	}
 	return out
 }
-

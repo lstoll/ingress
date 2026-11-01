@@ -24,6 +24,7 @@ spec:
             - --cert-mode=self-signed
             - --http-listen=0.0.0.0:80
             - --https-redirect-port=8443
+            - --oidc-client-keyset-secret=ingress-dev/ingress-oidc-client-keyset
           ports:
             - containerPort: 443
               name: tls
