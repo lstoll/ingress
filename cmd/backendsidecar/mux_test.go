@@ -139,7 +139,7 @@ func TestSidecarMuxSeparateProbeListen(t *testing.T) {
 	t.Cleanup(func() { _ = probeLn.Close() })
 
 	// Simulate binding to the configured probe-listen address.
-	go acceptLoop(probeLn, func(conn net.Conn) { handleProbeConn(mux.probe, conn) })
+	go acceptLoop(probeLn, mux.handleProbeConn)
 
 	resp, err := http.Get("http://" + probeLn.Addr().String() + "/healthz")
 	if err != nil {
@@ -229,5 +229,53 @@ func acceptLoop(ln net.Listener, handle func(net.Conn)) {
 			return
 		}
 		go handle(conn)
+	}
+}
+
+// A streamed (chunked) upstream response has no Content-Length. The probe
+// path must still frame it so the client can read the body and keep-alive
+// works, rather than hanging until the client times out.
+func TestSidecarMuxHTTPProbeStreamedBody(t *testing.T) {
+	body := bytes.Repeat([]byte("metric_line 1\n"), 1000)
+	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(body[:10])
+		w.(http.Flusher).Flush() // forces chunked encoding, no Content-Length
+		_, _ = w.Write(body[10:])
+	}))
+	t.Cleanup(app.Close)
+
+	mux, err := newSidecarMux(
+		slog.New(slog.DiscardHandler),
+		nil,
+		app.Listener.Addr().String(),
+		app.Listener.Addr().String(),
+		"",
+		[]string{"/metrics"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go acceptLoop(ln, mux.handle)
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	for i := range 2 { // second request exercises keep-alive on the same conn
+		resp, err := client.Get("http://" + ln.Addr().String() + "/metrics")
+		if err != nil {
+			t.Fatalf("request %d: %v", i, err)
+		}
+		got, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			t.Fatalf("request %d: reading body: %v", i, err)
+		}
+		if !bytes.Equal(got, body) {
+			t.Fatalf("request %d: body length %d, want %d", i, len(got), len(body))
+		}
 	}
 }

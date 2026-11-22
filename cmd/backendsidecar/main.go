@@ -108,6 +108,7 @@ func main() {
 	}, func(error) {
 		cancel()
 		_ = ln.Close()
+		_ = mux.Close()
 	})
 
 	if *probeListen != "" && mux.probe != nil {
@@ -127,7 +128,7 @@ func main() {
 					}
 					return fmt.Errorf("probe accept: %w", err)
 				}
-				go handleProbeConn(mux.probe, conn)
+				mux.handleProbeConn(conn)
 			}
 		}, func(error) {
 			cancel()

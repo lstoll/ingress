@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
 	"strings"
@@ -42,7 +41,12 @@ func newProbeHandler(logger *slog.Logger, forwardAddr string, pathPrefixes []str
 		prefixes: prefixes,
 		forward:  forwardAddr,
 	}
+	// Bound how long a probe waits on the app; the default transport has no
+	// response-header timeout, so a wedged app would hang scrapes forever.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = 30 * time.Second
 	p.proxy = &httputil.ReverseProxy{
+		Transport: transport,
 		Rewrite: func(req *httputil.ProxyRequest) {
 			req.SetURL(upstreamURL)
 			req.Out.Host = upstreamURL.Host
@@ -129,19 +133,88 @@ func validateProbeConfig(probeListen, probeForward string, pathPrefixes []string
 	return nil
 }
 
-func handleProbeConn(probe *probeHandler, conn net.Conn) {
-	defer func() { _ = conn.Close() }()
-	if probe == nil {
-		return
-	}
-	serveProbeHTTP(probe, conn, bufio.NewReader(conn))
+// probeServer serves plain-HTTP probe connections with a real http.Server, so
+// framing, keep-alive, streaming and timeouts are handled by net/http rather
+// than by hand. Connections are fed in by the mux (after it has peeked the
+// first byte) or by the dedicated --probe-listen accept loop.
+type probeServer struct {
+	srv *http.Server
+	ln  *connListener
 }
+
+func newProbeServer(logger *slog.Logger, h http.Handler) *probeServer {
+	ps := &probeServer{
+		srv: &http.Server{
+			Handler:           h,
+			ReadHeaderTimeout: 10 * time.Second,
+			IdleTimeout:       60 * time.Second,
+			ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
+		},
+		ln: newConnListener(),
+	}
+	go func() { _ = ps.srv.Serve(ps.ln) }()
+	return ps
+}
+
+// serveConn hands conn to the server, which then owns closing it.
+func (ps *probeServer) serveConn(conn net.Conn) {
+	if !ps.ln.push(conn) {
+		_ = conn.Close()
+	}
+}
+
+func (ps *probeServer) Close() error {
+	return ps.srv.Close()
+}
+
+// connListener is a net.Listener whose connections are pushed in by the
+// caller rather than accepted from a socket.
+type connListener struct {
+	conns chan net.Conn
+	done  chan struct{}
+	once  sync.Once
+}
+
+func newConnListener() *connListener {
+	return &connListener{conns: make(chan net.Conn), done: make(chan struct{})}
+}
+
+func (l *connListener) push(c net.Conn) bool {
+	select {
+	case l.conns <- c:
+		return true
+	case <-l.done:
+		return false
+	}
+}
+
+func (l *connListener) Accept() (net.Conn, error) {
+	select {
+	case c := <-l.conns:
+		return c, nil
+	case <-l.done:
+		return nil, net.ErrClosed
+	}
+}
+
+func (l *connListener) Close() error {
+	l.once.Do(func() { close(l.done) })
+	return nil
+}
+
+func (l *connListener) Addr() net.Addr { return probeListenerAddr{} }
+
+type probeListenerAddr struct{}
+
+func (probeListenerAddr) Network() string { return "probe" }
+func (probeListenerAddr) String() string  { return "probe" }
 
 type sidecarMux struct {
 	logger            *slog.Logger
 	tlsConfig         *tls.Config
 	forward           string
 	probe             *probeHandler
+	probeSrv          *probeServer
 	allowHTTPOnListen bool
 }
 
@@ -150,17 +223,43 @@ func newSidecarMux(logger *slog.Logger, tlsConfig *tls.Config, forward, probeFor
 	if err != nil {
 		return nil, err
 	}
-	return &sidecarMux{
+	m := &sidecarMux{
 		logger:            logger,
 		tlsConfig:         tlsConfig,
 		forward:           forward,
 		probe:             probe,
 		allowHTTPOnListen: probeListen == "",
-	}, nil
+	}
+	if probe != nil {
+		m.probeSrv = newProbeServer(logger.With("component", "probe"), probe)
+	}
+	return m, nil
+}
+
+// handleProbeConn serves a connection from the dedicated --probe-listen port.
+func (m *sidecarMux) handleProbeConn(conn net.Conn) {
+	if m.probeSrv == nil {
+		_ = conn.Close()
+		return
+	}
+	m.probeSrv.serveConn(conn)
+}
+
+// Close stops the probe server and any connections it is serving.
+func (m *sidecarMux) Close() error {
+	if m.probeSrv == nil {
+		return nil
+	}
+	return m.probeSrv.Close()
 }
 
 func (m *sidecarMux) handle(conn net.Conn) {
-	defer func() { _ = conn.Close() }()
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			_ = conn.Close()
+		}
+	}()
 
 	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		return
@@ -198,7 +297,8 @@ func (m *sidecarMux) handle(conn net.Conn) {
 			return
 		}
 		m.logger.Debug("serving probe HTTP", "remote", conn.RemoteAddr())
-		serveProbeHTTP(m.probe, wrapped, br)
+		handedOff = true
+		m.probeSrv.serveConn(wrapped)
 	default:
 		metricUnsupportedConnectionsTotal.Inc()
 		m.logger.Debug("unsupported connection kind", "remote", conn.RemoteAddr(), "kind", kind)
@@ -235,27 +335,6 @@ type bufioConn struct {
 
 func (c *bufioConn) Read(p []byte) (int, error) {
 	return c.r.Read(p)
-}
-
-func serveProbeHTTP(h http.Handler, conn net.Conn, br *bufio.Reader) {
-	for {
-		req, err := http.ReadRequest(br)
-		if err != nil {
-			return
-		}
-		req.RemoteAddr = conn.RemoteAddr().String()
-
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, req)
-		resp := rec.Result()
-		resp.Request = req
-		if err := resp.Write(conn); err != nil {
-			return
-		}
-		if req.Close || resp.Close {
-			return
-		}
-	}
 }
 
 func proxyConn(logger *slog.Logger, client net.Conn, forwardAddr string) {
